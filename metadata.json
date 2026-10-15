@@ -1,0 +1,6 @@
+{
+  "name": "КБЖУ Рацион",
+  "description": "Дневной рацион и фитнес-трекер КБЖУ с расчётом нормы калорий и макронутриентов",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

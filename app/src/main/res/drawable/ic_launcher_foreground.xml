@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Center of icon is (54, 54). Outer circular tracker ring -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M 54 28 A 26 26 0 1 1 53.9 28"
+        android:strokeColor="#2A2C38"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+
+    <!-- Active calorie arc in Wild Watermelon #FC6C85 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M 54 28 A 26 26 0 1 1 31 66"
+        android:strokeColor="#FC6C85"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+
+    <!-- Inner macro indicator arc in sky blue #38BDF8 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M 54 35 A 19 19 0 1 1 40 68"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round" />
+
+    <!-- Innermost flame / energy symbol in vibrant orange #FB923C -->
+    <path
+        android:fillColor="#FB923C"
+        android:pathData="M54,43 C51.5,47.5 48.5,50 48.5,54.5 C48.5,57.5 51,60 54,60 C57,60 59.5,57.5 59.5,54.5 C59.5,51 57.2,48.2 55.8,46.5 C55.4,46 54.8,44 54,43 Z" />
+
+    <path
+        android:fillColor="#FFEDD5"
+        android:pathData="M54,51 C52.9,52.8 52,54 52,55.5 C52,56.6 52.9,57.5 54,57.5 C55.1,57.5 56,56.6 56,55.5 C56,54.2 55,53.2 54,51 Z" />
+</vector>
