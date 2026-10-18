@@ -1,7 +1,6 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,7 +10,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -32,7 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,47 +46,81 @@ import com.example.ui.theme.CarbsColor
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.WildWatermelon
 import com.example.ui.theme.FatColor
 import com.example.ui.theme.ProteinColor
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
-import com.example.ui.theme.TextTertiary
-import java.util.Locale
+import com.example.ui.theme.WildWatermelon
 import kotlin.math.roundToInt
 
 @Composable
 fun CreateProductDialog(
     initialBarcode: String? = null,
+    prefilledData: com.example.ui.PrefilledProductData? = null,
+    isEditMode: Boolean = false,
     onDismiss: () -> Unit,
-    onSaveProduct: (name: String, category: String, calories: Double, protein: Double, fat: Double, carbs: Double, barcode: String?) -> Unit
+    onSaveProduct: (name: String, category: String, calories: Double, protein: Double, fat: Double, carbs: Double, barcode: String?) -> Unit,
+    appLanguage: String = "ru"
 ) {
-    var name by remember { mutableStateOf("") }
-    var barcodeText by remember { mutableStateOf(initialBarcode ?: "") }
-    var category by remember { mutableStateOf("Мои продукты") }
-    var caloriesText by remember { mutableStateOf("") }
-    var proteinText by remember { mutableStateOf("") }
-    var fatText by remember { mutableStateOf("") }
-    var carbsText by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var name by rememberSaveable(prefilledData, initialBarcode) { mutableStateOf(prefilledData?.name ?: "") }
+    var barcodeText by rememberSaveable(prefilledData, initialBarcode) { mutableStateOf(prefilledData?.barcode?.ifBlank { null } ?: initialBarcode ?: "") }
+    var category by rememberSaveable(prefilledData, initialBarcode) {
+        mutableStateOf(prefilledData?.category?.ifBlank { if (appLanguage == "en") "My Foods" else "Мои продукты" } ?: if (appLanguage == "en") "My Foods" else "Мои продукты")
+    }
+    var caloriesText by rememberSaveable(prefilledData, initialBarcode) {
+        mutableStateOf(
+            if ((prefilledData?.cal ?: 0.0) > 0) prefilledData!!.cal.roundToInt().toString() else ""
+        )
+    }
+    var proteinText by rememberSaveable(prefilledData, initialBarcode) {
+        mutableStateOf(
+            if ((prefilledData?.p ?: 0.0) > 0) String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", prefilledData!!.p) else ""
+        )
+    }
+    var fatText by rememberSaveable(prefilledData, initialBarcode) {
+        mutableStateOf(
+            if ((prefilledData?.f ?: 0.0) > 0) String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", prefilledData!!.f) else ""
+        )
+    }
+    var carbsText by rememberSaveable(prefilledData, initialBarcode) {
+        mutableStateOf(
+            if ((prefilledData?.c ?: 0.0) > 0) String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", prefilledData!!.c) else ""
+        )
+    }
+    var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val categories = listOf(
-        "Мои продукты",
-        "Мясо и птица",
-        "Рыба и морепродукты",
-        "Крупы и гарниры",
-        "Молочные продукты",
-        "Овощи и зелень",
-        "Фрукты и ягоды",
-        "Орехи и масла",
-        "Хлеб и выпечка",
-        "Перекусы и десерты"
-    )
+    val categories = if (appLanguage == "en") {
+        listOf(
+            "My Foods",
+            "Meat & Poultry",
+            "Fish & Seafood",
+            "Grains & Sides",
+            "Dairy & Eggs",
+            "Vegetables & Greens",
+            "Fruits & Berries",
+            "Nuts & Oils",
+            "Bread & Bakery",
+            "Snacks & Desserts"
+        )
+    } else {
+        listOf(
+            "Мои продукты",
+            "Мясо и птица",
+            "Рыба и морепродукты",
+            "Крупы и гарниры",
+            "Молочные продукты",
+            "Овощи и зелень",
+            "Фрукты и ягоды",
+            "Орехи и масла",
+            "Хлеб и выпечка",
+            "Перекусы и десерты"
+        )
+    }
 
     // Calculate approximate kcal from macros
-    val pVal = proteinText.toDoubleOrNull() ?: 0.0
-    val fVal = fatText.toDoubleOrNull() ?: 0.0
-    val cVal = carbsText.toDoubleOrNull() ?: 0.0
+    val pVal = proteinText.replace(',', '.').toDoubleOrNull() ?: 0.0
+    val fVal = fatText.replace(',', '.').toDoubleOrNull() ?: 0.0
+    val cVal = carbsText.replace(',', '.').toDoubleOrNull() ?: 0.0
     val estimatedKcal = (pVal * 4.0) + (fVal * 9.0) + (cVal * 4.0)
 
     Dialog(onDismissRequest = onDismiss) {
@@ -111,7 +143,11 @@ fun CreateProductDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Новый продукт",
+                        text = if (isEditMode) {
+                            if (appLanguage == "en") "Edit Product" else "Редактировать продукт"
+                        } else {
+                            if (appLanguage == "en") "Create Custom Product" else "Создать свой продукт"
+                        },
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
@@ -129,7 +165,7 @@ fun CreateProductDialog(
                 }
 
                 Text(
-                    text = "Укажите пищевую ценность на 100 г продукта",
+                    text = if (appLanguage == "en") "Nutrition facts per 100 g of product" else "Укажите пищевую ценность на 100 г продукта",
                     fontSize = 12.sp,
                     color = TextSecondary
                 )
@@ -143,8 +179,8 @@ fun CreateProductDialog(
                         name = it
                         errorMessage = null
                     },
-                    label = { Text("Название продукта *") },
-                    placeholder = { Text("Например: Домашние сырники") },
+                    label = { Text(if (appLanguage == "en") "Product Name *" else "Название продукта *") },
+                    placeholder = { Text(if (appLanguage == "en") "e.g. Homemade Cheesecakes" else "Например: Домашние сырники") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("new_product_name_input"),
@@ -170,8 +206,8 @@ fun CreateProductDialog(
                     onValueChange = { input ->
                         if (input.all { it.isDigit() }) barcodeText = input
                     },
-                    label = { Text("Штрих-код (EAN / UPC)") },
-                    placeholder = { Text("Например: 4601234567890") },
+                    label = { Text(if (appLanguage == "en") "Barcode (EAN / UPC)" else "Штрих-код (EAN / UPC)") },
+                    placeholder = { Text("4601234567890") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("new_product_barcode_input"),
@@ -194,7 +230,7 @@ fun CreateProductDialog(
 
                 // Category Selection
                 Text(
-                    text = "Категория:",
+                    text = if (appLanguage == "en") "Category:" else "Категория:",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextSecondary
@@ -228,23 +264,32 @@ fun CreateProductDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     NutrientInputField(
-                        label = "Белки",
+                        label = if (appLanguage == "en") "Protein" else "Белки",
                         value = proteinText,
-                        onValueChange = { proteinText = it },
+                        onValueChange = {
+                            proteinText = it
+                            errorMessage = null
+                        },
                         accentColor = ProteinColor,
                         modifier = Modifier.weight(1f)
                     )
                     NutrientInputField(
-                        label = "Жиры",
+                        label = if (appLanguage == "en") "Fat" else "Жиры",
                         value = fatText,
-                        onValueChange = { fatText = it },
+                        onValueChange = {
+                            fatText = it
+                            errorMessage = null
+                        },
                         accentColor = FatColor,
                         modifier = Modifier.weight(1f)
                     )
                     NutrientInputField(
-                        label = "Углеводы",
+                        label = if (appLanguage == "en") "Carbs" else "Углеводы",
                         value = carbsText,
-                        onValueChange = { carbsText = it },
+                        onValueChange = {
+                            carbsText = it
+                            errorMessage = null
+                        },
                         accentColor = CarbsColor,
                         modifier = Modifier.weight(1f)
                     )
@@ -260,18 +305,24 @@ fun CreateProductDialog(
                 ) {
                     OutlinedTextField(
                         value = caloriesText,
-                        onValueChange = { caloriesText = it },
-                        label = { Text("Калории (ккал) *") },
+                        onValueChange = { input ->
+                            val normalized = input.replace(',', '.')
+                            if (normalized.isEmpty() || normalized.matches(Regex("^\\d{0,4}(\\.\\d{0,2})?$"))) {
+                                caloriesText = normalized
+                                errorMessage = null
+                            }
+                        },
+                        label = { Text(if (appLanguage == "en") "Calories (kcal) *" else "Калории (ккал) *") },
                         placeholder = { Text("0") },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("new_product_calories_input"),
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = WildWatermelon,
-                            unfocusedBorderColor = DarkBorder,
+                            unfocusedBorderColor = com.example.ui.theme.OutlineStrong,
                             focusedTextColor = TextPrimary,
                             unfocusedTextColor = TextPrimary,
                             focusedContainerColor = DarkCard,
@@ -283,13 +334,16 @@ fun CreateProductDialog(
 
                     if (estimatedKcal > 0) {
                         OutlinedButton(
-                            onClick = { caloriesText = estimatedKcal.roundToInt().toString() },
+                            onClick = {
+                                caloriesText = estimatedKcal.roundToInt().toString()
+                                errorMessage = null
+                            },
                             shape = RoundedCornerShape(14.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, WildWatermelon),
                             modifier = Modifier.height(54.dp)
                         ) {
                             Text(
-                                text = "Авто: ${estimatedKcal.roundToInt()}",
+                                text = "Auto: ${estimatedKcal.roundToInt()}",
                                 fontSize = 12.sp,
                                 color = WildWatermelon,
                                 fontWeight = FontWeight.SemiBold
@@ -313,12 +367,17 @@ fun CreateProductDialog(
                 Button(
                     onClick = {
                         if (name.isBlank()) {
-                            errorMessage = "Пожалуйста, введите название продукта"
+                            errorMessage = if (appLanguage == "en") "Please enter product name" else "Пожалуйста, введите название продукта"
                             return@Button
                         }
-                        val cal = caloriesText.toDoubleOrNull() ?: estimatedKcal
-                        if (cal <= 0 && estimatedKcal <= 0) {
-                            errorMessage = "Укажите калорийность или БЖУ продукта"
+                        if (pVal + fVal + cVal > 100.0) {
+                            errorMessage = if (appLanguage == "en") "Sum of macros cannot exceed 100 g" else "Сумма белков, жиров и углеводов на 100 г не может превышать 100 г"
+                            return@Button
+                        }
+                        val enteredCal = caloriesText.replace(',', '.').toDoubleOrNull()
+                        val cal = if (enteredCal != null && enteredCal > 0.0) enteredCal else estimatedKcal
+                        if (cal <= 0.0) {
+                            errorMessage = if (appLanguage == "en") "Calories must be greater than 0" else "Укажите калорийность больше 0 или заполните БЖУ продукта"
                             return@Button
                         }
                         onSaveProduct(
@@ -342,7 +401,7 @@ fun CreateProductDialog(
                         .testTag("save_custom_product_button")
                 ) {
                     Text(
-                        text = "Сохранить продукт",
+                        text = if (appLanguage == "en") "Save Product" else "Сохранить продукт",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -363,8 +422,9 @@ private fun NutrientInputField(
     OutlinedTextField(
         value = value,
         onValueChange = { input ->
-            if (input.isEmpty() || input.all { it.isDigit() || it == '.' }) {
-                onValueChange(input)
+            val normalized = input.replace(',', '.')
+            if (normalized.isEmpty() || normalized.matches(Regex("^\\d{0,4}(\\.\\d{0,2})?$"))) {
+                onValueChange(normalized)
             }
         },
         label = {
@@ -377,7 +437,7 @@ private fun NutrientInputField(
         placeholder = { Text("0") },
         modifier = modifier,
         singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = accentColor,

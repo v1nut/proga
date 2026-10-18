@@ -124,12 +124,10 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `gemini food service parses quick meal text with fallback`() = runBlocking {
+    fun `gemini food service returns error when api key is not configured`() = runBlocking {
         val service = com.example.data.service.GeminiFoodService()
-        val result = service.parseQuickMealText("2 яйца и кофе")
-        org.junit.Assert.assertTrue(result.isSuccess)
-        val meal = result.getOrNull()
-        assertNotNull(meal)
-        org.junit.Assert.assertTrue(meal!!.calories > 0)
+        val result = service.parseQuickMealText("неизвестный продукт абракадабра")
+        org.junit.Assert.assertTrue(result.isFailure)
+        org.junit.Assert.assertNotNull(result.exceptionOrNull()?.message)
     }
 }

@@ -1,14 +1,10 @@
 package com.example.ui.components
 
-import android.graphics.Bitmap
-import android.graphics.ImageDecoder
-import android.net.Uri
-import android.os.Build
-import android.provider.MediaStore
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
-import android.widget.Toast
-import androidx.core.content.ContextCompat
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -18,12 +14,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -35,27 +32,30 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,80 +72,58 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import com.example.data.model.MealEntry
 import com.example.data.model.MealType
-import com.example.data.service.GeminiFoodService
-import com.example.data.service.RecognizedMeal
+import com.example.ui.AiPhotoItemUi
+import com.example.ui.AiPhotoState
 import com.example.ui.theme.CarbsColor
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkCardElevated
-import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.FatColor
 import com.example.ui.theme.ProteinColor
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import com.example.ui.theme.WildWatermelon
 import com.example.ui.theme.WildWatermelonContainer
-import kotlinx.coroutines.launch
+import com.example.ui.util.HapticUtil
 import kotlin.math.roundToInt
 
 @Composable
 fun AiFoodPhotoDialog(
-    initialMealType: MealType = MealType.LUNCH,
+    aiPhotoState: AiPhotoState,
+    onRequestCameraTempUri: (Context) -> Uri,
+    onProcessPhotoUri: (Context, Uri) -> Unit,
+    onUpdateDishName: (String) -> Unit,
+    onUpdateItemName: (id: String, name: String) -> Unit = { _, _ -> },
+    onUpdateItemGrams: (id: String, text: String) -> Unit = { _, _ -> },
+    onUpdateItemCalories: (id: String, text: String) -> Unit = { _, _ -> },
+    onUpdateItemProtein: (id: String, text: String) -> Unit = { _, _ -> },
+    onUpdateItemFat: (id: String, text: String) -> Unit = { _, _ -> },
+    onUpdateItemCarbs: (id: String, text: String) -> Unit = { _, _ -> },
+    onRemoveItem: (id: String) -> Unit = {},
+    onAddManualItem: () -> Unit = {},
+    onUpdateMealType: (MealType) -> Unit,
+    onOpenCatalogWithSearch: (String) -> Unit = {},
+    currentDateString: String = java.time.LocalDate.now().toString(),
+    effectiveTierGoal: com.example.data.model.FitnessGoal = com.example.data.model.FitnessGoal.MAINTENANCE,
     onDismiss: () -> Unit,
-    onAddMeal: (dishName: String, grams: Int, calories: Int, protein: Double, fat: Double, carbs: Double, mealType: MealType) -> Unit
+    onSaveMealEntries: (List<MealEntry>) -> Unit,
+    appLanguage: String = "ru"
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val geminiService = remember { GeminiFoodService() }
+    val view = LocalView.current
+    var showValidationErrors by remember { mutableStateOf(false) }
 
-    var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isAnalyzing by remember { mutableStateOf(false) }
-    var analysisDone by remember { mutableStateOf(false) }
-
-    var editableDishName by remember { mutableStateOf("") }
-    var editableGrams by remember { mutableIntStateOf(200) }
-    var baseCaloriesPer100g by remember { mutableDoubleStateOf(150.0) }
-    var baseProteinPer100g by remember { mutableDoubleStateOf(10.0) }
-    var baseFatPer100g by remember { mutableDoubleStateOf(5.0) }
-    var baseCarbsPer100g by remember { mutableDoubleStateOf(16.0) }
-    var selectedMealType by remember { mutableStateOf(initialMealType) }
-    var analysisNotes by remember { mutableStateOf("") }
-
-    // Camera launcher
+    // Camera launcher using High-Res TakePicture contract
     val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        if (bitmap != null) {
-            selectedBitmap = bitmap
-            isAnalyzing = true
-            scope.launch {
-                val result = geminiService.analyzeMealPhoto(bitmap)
-                result.onSuccess { meal ->
-                    editableDishName = meal.dishName
-                    editableGrams = meal.estimatedGrams
-                    val factor = if (meal.estimatedGrams > 0) 100.0 / meal.estimatedGrams else 1.0
-                    baseCaloriesPer100g = meal.calories * factor
-                    baseProteinPer100g = meal.protein * factor
-                    baseFatPer100g = meal.fat * factor
-                    baseCarbsPer100g = meal.carbs * factor
-                    selectedMealType = meal.mealType
-                    analysisNotes = meal.description
-                    analysisDone = true
-                }.onFailure { error ->
-                    Toast.makeText(context, error.message ?: "Лимит ИИ запросов. Введите параметры вручную.", Toast.LENGTH_LONG).show()
-                    editableDishName = "Блюдо по фото"
-                    editableGrams = 200
-                    baseCaloriesPer100g = 150.0
-                    baseProteinPer100g = 12.0
-                    baseFatPer100g = 5.0
-                    baseCarbsPer100g = 15.0
-                    analysisNotes = error.message ?: "Превышен лимит запросов к ИИ. Укажите название и макросы вручную."
-                    analysisDone = true
-                }
-                isAnalyzing = false
-            }
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        if (success && aiPhotoState.photoUri != null) {
+            onProcessPhotoUri(context, aiPhotoState.photoUri)
         }
     }
 
@@ -152,99 +131,40 @@ fun AiFoodPhotoDialog(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            try {
-                cameraLauncher.launch(null)
-            } catch (e: Exception) {
-                e.printStackTrace()
-                Toast.makeText(context, "Не удалось открыть камеру", Toast.LENGTH_SHORT).show()
-            }
-        } else {
-            Toast.makeText(context, "Необходимо разрешение на камеру", Toast.LENGTH_SHORT).show()
+            val uri = onRequestCameraTempUri(context)
+            cameraLauncher.launch(uri)
         }
     }
 
-    val launchCameraSafely = {
-        try {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                cameraLauncher.launch(null)
-            } else {
-                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(context, "Не удалось открыть камеру", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // Gallery picker launcher
+    // Gallery launcher
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
+    ) { uri ->
         if (uri != null) {
-            try {
-                val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri))
-                } else {
-                    @Suppress("DEPRECATION")
-                    MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
-                }
-                selectedBitmap = bitmap
-                isAnalyzing = true
-                scope.launch {
-                    val result = geminiService.analyzeMealPhoto(bitmap)
-                    result.onSuccess { meal ->
-                        editableDishName = meal.dishName
-                        editableGrams = meal.estimatedGrams
-                        val factor = if (meal.estimatedGrams > 0) 100.0 / meal.estimatedGrams else 1.0
-                        baseCaloriesPer100g = meal.calories * factor
-                        baseProteinPer100g = meal.protein * factor
-                        baseFatPer100g = meal.fat * factor
-                        baseCarbsPer100g = meal.carbs * factor
-                        selectedMealType = meal.mealType
-                        analysisNotes = meal.description
-                        analysisDone = true
-                    }.onFailure { error ->
-                        Toast.makeText(context, error.message ?: "Лимит ИИ запросов. Введите параметры вручную.", Toast.LENGTH_LONG).show()
-                        editableDishName = "Блюдо по фото"
-                        editableGrams = 200
-                        baseCaloriesPer100g = 150.0
-                        baseProteinPer100g = 12.0
-                        baseFatPer100g = 5.0
-                        baseCarbsPer100g = 15.0
-                        analysisNotes = error.message ?: "Превышен лимит запросов к ИИ. Укажите название и макросы вручную."
-                        analysisDone = true
-                    }
-                    isAnalyzing = false
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            onProcessPhotoUri(context, uri)
         }
     }
 
-    // Current recalculated values
-    val currentCalories = (baseCaloriesPer100g * editableGrams / 100.0).roundToInt()
-    val currentProtein = ((baseProteinPer100g * editableGrams / 100.0) * 10).roundToInt() / 10.0
-    val currentFat = ((baseFatPer100g * editableGrams / 100.0) * 10).roundToInt() / 10.0
-    val currentCarbs = ((baseCarbsPer100g * editableGrams / 100.0) * 10).roundToInt() / 10.0
+    val totalGrams = aiPhotoState.items.sumOf { it.gramsText.toDoubleOrNull() ?: 0.0 }
+    val totalCalories = aiPhotoState.items.sumOf { it.caloriesText.toDoubleOrNull() ?: 0.0 }
+    val totalProtein = aiPhotoState.items.sumOf { it.proteinText.replace(',', '.').toDoubleOrNull() ?: 0.0 }
+    val totalFat = aiPhotoState.items.sumOf { it.fatText.replace(',', '.').toDoubleOrNull() ?: 0.0 }
+    val totalCarbs = aiPhotoState.items.sumOf { it.carbsText.replace(',', '.').toDoubleOrNull() ?: 0.0 }
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .clip(RoundedCornerShape(26.dp))
-                .border(1.dp, DarkBorder, RoundedCornerShape(26.dp))
-                .testTag("ai_food_photo_dialog"),
-            color = DarkSurface
+            modifier = Modifier.fillMaxSize(),
+            color = DarkBackground
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .verticalScroll(rememberScrollState())
-                    .padding(20.dp)
+                    .padding(horizontal = 18.dp, vertical = 16.dp)
+                    .testTag("ai_food_photo_dialog")
             ) {
                 // Header
                 Row(
@@ -255,8 +175,8 @@ fun AiFoodPhotoDialog(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .size(36.dp)
+                                .clip(CircleShape)
                                 .background(WildWatermelonContainer),
                             contentAlignment = Alignment.Center
                         ) {
@@ -270,13 +190,13 @@ fun AiFoodPhotoDialog(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "ИИ-анализ блюда",
+                                text = if (appLanguage == "en") "AI Photo Recognition" else "ИИ Распознавание блюда",
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
                             Text(
-                                text = "Gemini 3.5 Flash",
+                                text = if (appLanguage == "en") "Take a photo or upload from gallery" else "Сделайте фото или загрузите из галереи",
                                 fontSize = 11.sp,
                                 color = TextSecondary
                             )
@@ -294,319 +214,345 @@ fun AiFoodPhotoDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Photo preview or Capture Buttons
-                if (selectedBitmap == null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(180.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(DarkCard)
-                            .border(1.dp, DarkBorder, RoundedCornerShape(18.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
+                // Photo Preview Box
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(DarkCard)
+                        .border(1.dp, WildWatermelon.copy(alpha = 0.3f), RoundedCornerShape(20.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (aiPhotoState.selectedBitmap != null) {
+                        Image(
+                            bitmap = aiPhotoState.selectedBitmap.asImageBitmap(),
+                            contentDescription = "Фото еды",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                text = "Сфотографируйте еду или выберите фото",
-                                fontSize = 13.sp,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(bottom = 14.dp)
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Button(
-                                    onClick = { launchCameraSafely() },
-                                    shape = RoundedCornerShape(14.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = WildWatermelon,
-                                        contentColor = Color(0xFF101014)
-                                    )
-                                ) {
-                                    Icon(imageVector = Icons.Default.CameraAlt, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Камера", fontWeight = FontWeight.Bold)
-                                }
-
-                                Button(
-                                    onClick = { galleryLauncher.launch("image/*") },
-                                    shape = RoundedCornerShape(14.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = DarkCardElevated,
-                                        contentColor = TextPrimary
-                                    )
-                                ) {
-                                    Icon(imageVector = Icons.Default.PhotoLibrary, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Галерея")
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Display captured image with change button
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(190.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                    ) {
-                        Image(
-                            bitmap = selectedBitmap!!.asImageBitmap(),
-                            contentDescription = "Фотография блюда",
-                            modifier = Modifier.fillMaxWidth().height(190.dp),
-                            contentScale = ContentScale.Crop
-                        )
-
-                        // Retake button overlay
-                        Row(
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(DarkBackground.copy(alpha = 0.8f))
-                                .clickable { selectedBitmap = null; analysisDone = false }
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 imageVector = Icons.Default.CameraAlt,
                                 contentDescription = null,
                                 tint = WildWatermelon,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(44.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Переснять", fontSize = 11.sp, color = TextPrimary)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Analyzing indicator
-                if (isAnalyzing) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(DarkCard)
-                            .padding(20.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(
-                                color = WildWatermelon,
-                                modifier = Modifier.size(36.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "ИИ распознаёт блюдо и КБЖУ...",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "Оценка массы и питательной ценности",
+                                text = if (appLanguage == "en") "Tap buttons below to take or upload a photo" else "Нажмите кнопки ниже, чтобы сделать фото",
                                 fontSize = 12.sp,
                                 color = TextSecondary
                             )
                         }
                     }
+
+                    // Analyzing overlay
+                    if (aiPhotoState.isAnalyzing) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.7f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = WildWatermelon, strokeWidth = 3.dp)
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = if (appLanguage == "en") "AI is analyzing dish..." else "ИИ анализирует блюдо...",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                            }
+                        }
+                    }
                 }
 
-                // Editable result card
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Camera & Gallery Buttons Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                val uri = onRequestCameraTempUri(context)
+                                cameraLauncher.launch(uri)
+                            } else {
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = WildWatermelon,
+                            contentColor = Color(0xFF101014)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (appLanguage == "en") "Take Photo" else "Снять фото", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = DarkCardElevated,
+                            contentColor = TextPrimary
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (appLanguage == "en") "Gallery Upload" else "Из галереи", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // Error Card
                 AnimatedVisibility(
-                    visible = analysisDone && !isAnalyzing,
+                    visible = aiPhotoState.errorMessage != null,
                     enter = fadeIn(),
                     exit = fadeOut()
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(DarkCard)
-                            .border(1.dp, WildWatermelon.copy(alpha = 0.3f), RoundedCornerShape(18.dp))
-                            .padding(16.dp)
+                            .padding(top = 10.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF2A1517))
+                            .border(1.dp, Color(0xFFF87171), RoundedCornerShape(12.dp))
+                            .padding(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = Color(0xFFF87171), modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(text = aiPhotoState.errorMessage ?: "Ошибка", fontSize = 12.sp, color = Color(0xFFF87171))
+                        }
+                    }
+                }
+
+                if (aiPhotoState.items.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Section Title
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Результат распознавания (можно отредактировать):",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = WildWatermelon
+                            text = if (appLanguage == "en") "Recognized Items (${aiPhotoState.items.size}):" else "Распознанные блюда (${aiPhotoState.items.size}):",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
                         )
 
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Dish Name input
-                        OutlinedTextField(
-                            value = editableDishName,
-                            onValueChange = { editableDishName = it },
-                            label = { Text("Название блюда") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = WildWatermelon,
-                                unfocusedBorderColor = DarkBorder,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            )
-                        )
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        // Quick override chips
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf(
-                                "Омлет с сыром" to Triple(200, 280, Triple(18.0, 20.0, 3.0)),
-                                "Салат Цезарь" to Triple(220, 240, Triple(14.0, 16.0, 10.0)),
-                                "Паста Карбонара" to Triple(280, 450, Triple(16.0, 18.0, 52.0)),
-                                "Пицца Маргарита" to Triple(250, 380, Triple(14.0, 12.0, 50.0)),
-                                "Кофе Капучино" to Triple(200, 110, Triple(3.5, 4.0, 12.0)),
-                                "Стейк из лосося" to Triple(220, 360, Triple(30.0, 22.0, 1.0))
-                            ).forEach { (name, info) ->
-                                val grams = info.first
-                                val cal = info.second
-                                val p = info.third.first
-                                val f = info.third.second
-                                val c = info.third.third
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(DarkCardElevated)
-                                        .border(0.5.dp, WildWatermelon.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                        .clickable {
-                                            editableDishName = name
-                                            editableGrams = grams
-                                            baseCaloriesPer100g = (cal.toDouble() / grams) * 100
-                                            baseProteinPer100g = (p / grams) * 100
-                                            baseFatPer100g = (f / grams) * 100
-                                            baseCarbsPer100g = (c / grams) * 100
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Text(name, fontSize = 11.sp, color = TextPrimary)
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Portion Grams input
-                        OutlinedTextField(
-                            value = editableGrams.toString(),
-                            onValueChange = { str ->
-                                val parsed = str.filter { it.isDigit() }.toIntOrNull() ?: 0
-                                editableGrams = parsed.coerceIn(1, 2000)
+                        TextButton(
+                            onClick = {
+                                onDismiss()
+                                onOpenCatalogWithSearch(aiPhotoState.dishName)
                             },
-                            label = { Text("Масса порции (г)") },
-                            modifier = Modifier.fillMaxWidth(),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = WildWatermelon,
-                                unfocusedBorderColor = DarkBorder,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            )
-                        )
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Search, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (appLanguage == "en") "Search Catalog" else "Найти в каталоге", fontSize = 11.sp, color = WildWatermelon)
+                        }
+                    }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                        // Meal Type Selector
-                        Text(
-                            text = "Приём пищи:",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = TextSecondary
+                    // List of Item Cards
+                    aiPhotoState.items.forEach { item ->
+                        AiPhotoItemCard(
+                            item = item,
+                            effectiveTierGoal = effectiveTierGoal,
+                            showValidationErrors = showValidationErrors,
+                            onUpdateName = { name -> onUpdateItemName(item.id, name) },
+                            onUpdateGrams = { grams -> onUpdateItemGrams(item.id, grams) },
+                            onUpdateCalories = { cal -> onUpdateItemCalories(item.id, cal) },
+                            onUpdateProtein = { p -> onUpdateItemProtein(item.id, p) },
+                            onUpdateFat = { f -> onUpdateItemFat(item.id, f) },
+                            onUpdateCarbs = { c -> onUpdateItemCarbs(item.id, c) },
+                            onRemove = { onRemoveItem(item.id) },
+                            appLanguage = appLanguage
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+
+                    // Add Manual Item Button
+                    OutlinedButton(
+                        onClick = onAddManualItem,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, WildWatermelon.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = WildWatermelon),
+                        modifier = Modifier.fillMaxWidth().height(42.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (appLanguage == "en") "+ Add another item" else "+ Добавить ещё блюдо", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Total Summary Card
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(DarkCard)
+                            .border(1.dp, WildWatermelon.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                            .padding(12.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            listOf(
-                                MealType.BREAKFAST to "Завтрак",
-                                MealType.LUNCH to "Обед",
-                                MealType.DINNER to "Ужин",
-                                MealType.SNACK to "Перекус"
-                            ).forEach { (mType, label) ->
-                                val isSelected = selectedMealType == mType
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(if (isSelected) WildWatermelon else DarkCardElevated)
-                                        .clickable { selectedMealType = mType }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 11.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isSelected) Color(0xFF101014) else TextPrimary
-                                    )
-                                }
-                            }
+                            Text(
+                                text = if (appLanguage == "en") "Total Meal (${totalGrams.roundToInt()} g):" else "Итого обед (${totalGrams.roundToInt()} г):",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = TextSecondary
+                            )
+                            Text(
+                                text = "${totalCalories.roundToInt()} ккал",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = WildWatermelon
+                            )
                         }
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                        // Calculated Macros Chips
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            MacroChip(title = "Ккал", value = currentCalories.toString(), color = WildWatermelon, modifier = Modifier.weight(1f))
-                            MacroChip(title = "Белки", value = "${currentProtein}г", color = ProteinColor, modifier = Modifier.weight(1f))
-                            MacroChip(title = "Жиры", value = "${currentFat}г", color = FatColor, modifier = Modifier.weight(1f))
-                            MacroChip(title = "Углеводы", value = "${currentCarbs}г", color = CarbsColor, modifier = Modifier.weight(1f))
+                            Text(text = if (appLanguage == "en") "Protein: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalProtein)}g" else "Б: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalProtein)}г", fontSize = 11.sp, color = ProteinColor, fontWeight = FontWeight.Bold)
+                            Text(text = if (appLanguage == "en") "Fat: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalFat)}g" else "Ж: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalFat)}г", fontSize = 11.sp, color = FatColor, fontWeight = FontWeight.Bold)
+                            Text(text = if (appLanguage == "en") "Carbs: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalCarbs)}g" else "У: ${String.format(java.util.Locale.forLanguageTag("ru"), "%.1f", totalCarbs)}г", fontSize = 11.sp, color = CarbsColor, fontWeight = FontWeight.Bold)
                         }
+                    }
 
-                        if (analysisNotes.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "💡 $analysisNotes",
-                                fontSize = 11.sp,
-                                color = TextSecondary
-                            )
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Meal Type Selector
+                    Text(if (appLanguage == "en") "Meal Section:" else "Приём пищи:", fontSize = 11.sp, color = TextSecondary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        MealType.entries.forEach { mType ->
+                            val isSelected = aiPhotoState.selectedMealType == mType
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) WildWatermelon else DarkCardElevated)
+                                    .clickable { onUpdateMealType(mType) }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = mType.title(appLanguage),
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) Color(0xFF101014) else TextPrimary
+                                )
+                            }
                         }
+                    }
 
-                        Spacer(modifier = Modifier.height(18.dp))
+                    if (aiPhotoState.analysisNotes.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "💡 ${aiPhotoState.analysisNotes}",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            lineHeight = 15.sp
+                        )
+                    }
 
-                        // Add to diary button
-                        Button(
-                            onClick = {
-                                if (editableDishName.isNotBlank() && editableGrams > 0) {
-                                    onAddMeal(
-                                        editableDishName,
-                                        editableGrams,
-                                        currentCalories,
-                                        currentProtein,
-                                        currentFat,
-                                        currentCarbs,
-                                        selectedMealType
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            showValidationErrors = true
+                            val allItemsValid = aiPhotoState.items.isNotEmpty() && aiPhotoState.items.all { item ->
+                                val g = item.gramsText.toIntOrNull() ?: 0
+                                item.name.isNotBlank() && g in 1..3000
+                            }
+
+                            if (allItemsValid) {
+                                val entries = aiPhotoState.items.map { item ->
+                                    val g = item.gramsText.toDoubleOrNull() ?: 100.0
+                                    val cal = item.caloriesText.toDoubleOrNull() ?: (item.baseCalPer100g * g / 100.0)
+                                    val p = item.proteinText.replace(',', '.').toDoubleOrNull() ?: (item.basePPer100g * g / 100.0)
+                                    val f = item.fatText.replace(',', '.').toDoubleOrNull() ?: (item.baseFPer100g * g / 100.0)
+                                    val c = item.carbsText.replace(',', '.').toDoubleOrNull() ?: (item.baseCPer100g * g / 100.0)
+
+                                    MealEntry(
+                                        dateString = currentDateString,
+                                        mealType = aiPhotoState.selectedMealType.name,
+                                        productName = item.name.trim().ifBlank { "Блюдо" },
+                                        weightGrams = g,
+                                        calories = cal,
+                                        protein = p,
+                                        fat = f,
+                                        carbs = c
                                     )
+                                }
+                                if (entries.isNotEmpty()) {
+                                    HapticUtil.performConfirm(view)
+                                    onSaveMealEntries(entries)
                                     onDismiss()
                                 }
-                            },
-                            modifier = Modifier.fillMaxWidth().height(48.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = WildWatermelon,
-                                contentColor = Color(0xFF101014)
-                            )
-                        ) {
-                            Icon(imageVector = Icons.Default.Check, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Добавить в дневник", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = WildWatermelon,
+                            contentColor = Color(0xFF101014)
+                        )
+                    ) {
+                        Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (appLanguage == "en") "Save to Diary" else "Добавить в дневник", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    val allItemsValid = aiPhotoState.items.isNotEmpty() && aiPhotoState.items.all { item ->
+                        val g = item.gramsText.toIntOrNull() ?: 0
+                        item.name.isNotBlank() && g in 1..3000
+                    }
+
+                    if (showValidationErrors && !allItemsValid) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (appLanguage == "en")
+                                "Fill in the name and weight from 1 to 3000 g for each item"
+                            else
+                                "Укажите название и массу от 1 до 3000 г для каждой позиции",
+                            color = Color(0xFFF87171),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
@@ -615,23 +561,170 @@ fun AiFoodPhotoDialog(
 }
 
 @Composable
-private fun MacroChip(
-    title: String,
-    value: String,
-    color: Color,
-    modifier: Modifier = Modifier
+private fun AiPhotoItemCard(
+    item: AiPhotoItemUi,
+    effectiveTierGoal: com.example.data.model.FitnessGoal = com.example.data.model.FitnessGoal.MAINTENANCE,
+    showValidationErrors: Boolean,
+    onUpdateName: (String) -> Unit,
+    onUpdateGrams: (String) -> Unit,
+    onUpdateCalories: (String) -> Unit,
+    onUpdateProtein: (String) -> Unit,
+    onUpdateFat: (String) -> Unit,
+    onUpdateCarbs: (String) -> Unit,
+    onRemove: () -> Unit,
+    appLanguage: String = "ru"
 ) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = 0.15f))
-            .border(0.5.dp, color.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
-            .padding(vertical = 8.dp),
-        contentAlignment = Alignment.Center
+    val gramsVal = item.gramsText.toIntOrNull() ?: 0
+    val isGramsValid = gramsVal in 1..3000
+
+    val (tier, _) = remember(item, effectiveTierGoal, appLanguage) {
+        com.example.ui.util.FoodTierSystem.evaluateProductTier(
+            name = item.name,
+            category = "",
+            calories = item.baseCalPer100g,
+            protein = item.basePPer100g,
+            fat = item.baseFPer100g,
+            carbs = item.baseCPer100g,
+            goal = effectiveTierGoal,
+            lang = appLanguage
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(DarkCard)
+            .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+            .padding(12.dp)
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = value, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = color)
-            Text(text = title, fontSize = 10.sp, color = TextSecondary)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            com.example.ui.util.TierSquareBadge(tier = tier, size = 26.dp)
+            Spacer(modifier = Modifier.width(8.dp))
+
+            OutlinedTextField(
+                value = item.name,
+                onValueChange = onUpdateName,
+                label = { Text(if (appLanguage == "en") "Food Name" else "Название блюда", fontSize = 10.sp) },
+                singleLine = true,
+                isError = showValidationErrors && item.name.isBlank(),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = WildWatermelon,
+                    unfocusedBorderColor = DarkBorder,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary
+                )
+            )
+
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.size(36.dp).padding(start = 4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = "Удалить",
+                    tint = Color(0xFFF87171),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = item.gramsText,
+                onValueChange = onUpdateGrams,
+                label = { Text(if (appLanguage == "en") "Weight (g)" else "Масса (г)", fontSize = 10.sp) },
+                singleLine = true,
+                isError = showValidationErrors && !isGramsValid,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = WildWatermelon,
+                    unfocusedBorderColor = DarkBorder,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary
+                )
+            )
+
+            OutlinedTextField(
+                value = item.caloriesText,
+                onValueChange = onUpdateCalories,
+                label = { Text(if (appLanguage == "en") "Kcal" else "Калории", fontSize = 10.sp) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = WildWatermelon,
+                    unfocusedBorderColor = DarkBorder,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            OutlinedTextField(
+                value = item.proteinText,
+                onValueChange = onUpdateProtein,
+                label = { Text(if (appLanguage == "en") "Prot" else "Белки", color = ProteinColor, fontSize = 9.sp) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = ProteinColor,
+                    unfocusedBorderColor = DarkBorder
+                )
+            )
+
+            OutlinedTextField(
+                value = item.fatText,
+                onValueChange = onUpdateFat,
+                label = { Text(if (appLanguage == "en") "Fat" else "Жиры", color = FatColor, fontSize = 9.sp) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = FatColor,
+                    unfocusedBorderColor = DarkBorder
+                )
+            )
+
+            OutlinedTextField(
+                value = item.carbsText,
+                onValueChange = onUpdateCarbs,
+                label = { Text(if (appLanguage == "en") "Carb" else "Углеводы", color = CarbsColor, fontSize = 9.sp) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = TextPrimary),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CarbsColor,
+                    unfocusedBorderColor = DarkBorder
+                )
+            )
         }
     }
 }

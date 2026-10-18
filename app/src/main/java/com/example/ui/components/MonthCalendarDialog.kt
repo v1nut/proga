@@ -42,7 +42,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkCardElevated
@@ -52,7 +51,6 @@ import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 import com.example.ui.theme.WildWatermelon
 import com.example.ui.theme.WildWatermelonContainer
-import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
@@ -63,13 +61,16 @@ fun MonthCalendarDialog(
     selectedDate: LocalDate,
     dailyCaloriesMap: Map<String, Double> = emptyMap(),
     onDateSelected: (LocalDate) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    appLanguage: String = "ru"
 ) {
     var displayedMonth by remember(selectedDate) {
         mutableStateOf(YearMonth.from(selectedDate))
     }
     val today = remember { LocalDate.now() }
-    val monthTitleFormatter = remember { DateTimeFormatter.ofPattern("LLLL yyyy", Locale("ru")) }
+    val monthTitleFormatter = remember(appLanguage) {
+        DateTimeFormatter.ofPattern("LLLL yyyy", if (appLanguage == "en") Locale.ENGLISH else Locale("ru"))
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -147,14 +148,14 @@ fun MonthCalendarDialog(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Предыдущий месяц",
+                            contentDescription = null,
                             tint = TextPrimary,
                             modifier = Modifier.size(16.dp)
                         )
                     }
 
                     Text(
-                        text = "Выберите день",
+                        text = if (appLanguage == "en") "Select a day" else "Выберите день",
                         fontSize = 12.sp,
                         color = TextSecondary,
                         fontWeight = FontWeight.Medium
@@ -166,7 +167,7 @@ fun MonthCalendarDialog(
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Следующий месяц",
+                            contentDescription = null,
                             tint = TextPrimary,
                             modifier = Modifier.size(16.dp)
                         )
@@ -175,8 +176,8 @@ fun MonthCalendarDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Days of week header (ПН - ВС)
-                val dayHeaders = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+                // Days of week header
+                val dayHeaders = if (appLanguage == "en") listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") else listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceAround
@@ -186,7 +187,7 @@ fun MonthCalendarDialog(
                             text = header,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (header == "Сб" || header == "Вс") WildWatermelon.copy(alpha = 0.8f) else TextTertiary,
+                            color = if (header == "Сб" || header == "Вс" || header == "Sat" || header == "Sun") WildWatermelon.copy(alpha = 0.8f) else TextTertiary,
                             modifier = Modifier.weight(1f),
                             textAlign = TextAlign.Center
                         )
@@ -198,12 +199,10 @@ fun MonthCalendarDialog(
                 // Calendar grid calculation
                 val firstOfMonth = displayedMonth.atDay(1)
                 val daysInMonth = displayedMonth.lengthOfMonth()
-                // DayOfWeek: MONDAY=1 ... SUNDAY=7
                 val startDayOfWeek = firstOfMonth.dayOfWeek.value // 1..7 (Monday=1)
                 val leadingEmptySlots = startDayOfWeek - 1
 
                 val totalCells = ((leadingEmptySlots + daysInMonth + 6) / 7) * 7
-
                 val rows = totalCells / 7
 
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -303,7 +302,7 @@ fun MonthCalendarDialog(
                         ),
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("Перейти к сегодня", fontSize = 13.sp)
+                        Text(if (appLanguage == "en") "Go to Today" else "Перейти к сегодня", fontSize = 13.sp)
                     }
 
                     Spacer(modifier = Modifier.width(10.dp))
@@ -317,7 +316,7 @@ fun MonthCalendarDialog(
                         ),
                         modifier = Modifier.weight(0.8f)
                     ) {
-                        Text("Готово", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(if (appLanguage == "en") "Done" else "Готово", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
                 }
             }

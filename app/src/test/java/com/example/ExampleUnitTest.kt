@@ -136,6 +136,11 @@ class ExampleUnitTest {
         val breadPortion = com.example.ui.components.detectSmartPortion(bread)
         assertEquals("кусок", breadPortion.unitName)
         assertEquals(35.0, breadPortion.gramsPerUnit, 0.1)
+
+        val crispbread = Product(name = "Хлебцы ржаные", category = "Хлеб и выпечка", calories = 310.0, protein = 11.0, fat = 2.0, carbs = 58.0)
+        val crispbreadPortion = com.example.ui.components.detectSmartPortion(crispbread)
+        assertEquals("шт", crispbreadPortion.unitName)
+        assertEquals(10.0, crispbreadPortion.gramsPerUnit, 0.1)
     }
 
     @Test
@@ -143,5 +148,79 @@ class ExampleUnitTest {
         val weight = 70.0
         val targetWater = (weight * 30.0).toInt().coerceAtLeast(1500)
         assertEquals(2100, targetWater)
+    }
+
+    @Test
+    fun testTeaWithoutSugar() {
+        val service = com.example.data.service.GeminiFoodService()
+        val tea = service.fallbackQuickTextAnalysis("чай без сахара")
+        assertEquals(1, tea.items.size)
+        assertEquals("Чай без сахара", tea.items[0].name)
+        assertEquals(2, tea.items[0].calories)
+        assertTrue(tea.isEstimate)
+    }
+
+    @Test
+    fun testChickenCutlet() {
+        val service = com.example.data.service.GeminiFoodService()
+        val cutlet = service.fallbackQuickTextAnalysis("куриная котлета")
+        assertEquals(1, cutlet.items.size)
+        assertEquals("Куриная котлета", cutlet.items[0].name)
+        assertTrue("Calories should be around 195", cutlet.calories in 150..220)
+    }
+
+    @Test
+    fun testTurkeyBreast() {
+        val service = com.example.data.service.GeminiFoodService()
+        val turkey = service.fallbackQuickTextAnalysis("грудка индейки")
+        assertEquals(1, turkey.items.size)
+        assertEquals("Филе индейки", turkey.items[0].name)
+    }
+
+    @Test
+    fun testPollackFillet() {
+        val service = com.example.data.service.GeminiFoodService()
+        val pollack = service.fallbackQuickTextAnalysis("филе минтая")
+        assertEquals(1, pollack.items.size)
+        assertEquals("Филе минтая", pollack.items[0].name)
+    }
+
+    @Test
+    fun testRawEgg() {
+        val service = com.example.data.service.GeminiFoodService()
+        val rawEgg = service.fallbackQuickTextAnalysis("сырое яйцо")
+        assertEquals(1, rawEgg.items.size)
+        assertEquals("Яйцо сырое (1 шт)", rawEgg.items[0].name)
+        assertEquals(78, rawEgg.items[0].calories)
+    }
+
+    @Test
+    fun testCottageCheeseAndBanana() {
+        val service = com.example.data.service.GeminiFoodService()
+        val tworogBanana = service.fallbackQuickTextAnalysis("творог 200г, банан")
+        assertEquals(2, tworogBanana.items.size)
+        assertEquals("Творог 5%", tworogBanana.items[0].name)
+        assertEquals(200, tworogBanana.items[0].grams)
+        assertEquals("Банан свежий", tworogBanana.items[1].name)
+        assertEquals(120, tworogBanana.items[1].grams)
+    }
+
+    @Test
+    fun testPureeUnrecognized() {
+        val service = com.example.data.service.GeminiFoodService()
+        val puree = service.fallbackQuickTextAnalysis("пюре")
+        assertEquals(0, puree.items.size)
+        assertEquals(1, puree.unrecognizedItems.size)
+        assertEquals("пюре", puree.unrecognizedItems[0])
+    }
+
+    @Test
+    fun testShawarma() {
+        val service = com.example.data.service.GeminiFoodService()
+        val shawarma = service.fallbackQuickTextAnalysis("шаурма")
+        assertEquals(1, shawarma.items.size)
+        assertEquals("Шаурма с курицей", shawarma.items[0].name)
+        assertEquals(250, shawarma.items[0].grams)
+        assertTrue("Calories around 580", shawarma.calories in 500..650)
     }
 }

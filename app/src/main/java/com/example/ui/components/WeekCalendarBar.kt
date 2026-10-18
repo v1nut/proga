@@ -19,7 +19,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -57,13 +58,16 @@ fun WeekCalendarBar(
     dailyCaloriesMap: Map<String, Double>, // dateString -> consumed calories
     targetCalories: Int,
     onSelectDate: (LocalDate) -> Unit,
+    appLanguage: String = "ru",
     modifier: Modifier = Modifier
 ) {
     val today = remember { LocalDate.now() }
     var isMonthExpanded by remember { mutableStateOf(false) }
 
-    val monthFormatter = remember { DateTimeFormatter.ofPattern("LLLL yyyy", Locale("ru")) }
-    val monthTitle = remember(selectedDate) {
+    val monthFormatter = remember(appLanguage) {
+        DateTimeFormatter.ofPattern("LLLL yyyy", if (appLanguage == "en") Locale.ENGLISH else Locale("ru"))
+    }
+    val monthTitle = remember(selectedDate, appLanguage) {
         selectedDate.format(monthFormatter).replaceFirstChar { it.uppercase() }
     }
 
@@ -113,7 +117,7 @@ fun WeekCalendarBar(
                         onSelectDate(selectedDate.minusWeeks(1))
                     }
                 },
-                modifier = Modifier.size(34.dp).testTag("week_prev_button")
+                modifier = Modifier.size(40.dp).testTag("week_prev_button")
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -140,7 +144,7 @@ fun WeekCalendarBar(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
-                        imageVector = if (isMonthExpanded) Icons.Default.ArrowDropDown else Icons.Default.ArrowDropDown,
+                        imageVector = if (isMonthExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                         contentDescription = "Переключить вид месяца",
                         tint = WildWatermelon,
                         modifier = Modifier.size(20.dp)
@@ -159,7 +163,7 @@ fun WeekCalendarBar(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = "Сегодня",
+                            text = if (appLanguage == "en") "Today" else "Сегодня",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = WildWatermelon
@@ -176,7 +180,7 @@ fun WeekCalendarBar(
                         onSelectDate(selectedDate.plusWeeks(1))
                     }
                 },
-                modifier = Modifier.size(34.dp).testTag("week_next_button")
+                modifier = Modifier.size(40.dp).testTag("week_next_button")
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowForward,
@@ -197,7 +201,7 @@ fun WeekCalendarBar(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val dayNames = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+                    val dayNames = if (appLanguage == "en") listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") else listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
                     dayNames.forEach { dayName ->
                         Text(
                             text = dayName,
@@ -246,7 +250,7 @@ fun WeekCalendarBar(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val dayNames = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+                    val dayNames = if (appLanguage == "en") listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") else listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
                     dayNames.forEach { dayName ->
                         Text(
                             text = dayName,

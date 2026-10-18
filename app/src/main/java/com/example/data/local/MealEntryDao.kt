@@ -23,6 +23,9 @@ interface MealEntryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEntry(entry: MealEntry): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEntries(entries: List<MealEntry>): List<Long>
+
     @Update
     suspend fun updateEntry(entry: MealEntry)
 
@@ -31,4 +34,7 @@ interface MealEntryDao {
 
     @Query("DELETE FROM meal_entries WHERE id = :id")
     suspend fun deleteEntryById(id: Long)
+
+    @Query("DELETE FROM meal_entries WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
 }

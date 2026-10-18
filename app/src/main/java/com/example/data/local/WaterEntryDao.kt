@@ -16,12 +16,21 @@ interface WaterEntryDao {
     @Query("SELECT SUM(amountMl) FROM water_entries WHERE dateString = :dateString")
     fun getTotalWaterForDate(dateString: String): Flow<Int?>
 
+    @Query("SELECT * FROM water_entries ORDER BY timestamp ASC")
+    fun getAllEntries(): Flow<List<WaterEntry>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEntry(entry: WaterEntry): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEntries(entries: List<WaterEntry>): List<Long>
 
     @Delete
     suspend fun deleteEntry(entry: WaterEntry)
 
     @Query("DELETE FROM water_entries WHERE id = (SELECT id FROM water_entries WHERE dateString = :dateString ORDER BY timestamp DESC LIMIT 1)")
     suspend fun deleteLastEntryForDate(dateString: String)
+
+    @Query("SELECT * FROM water_entries WHERE dateString = :dateString ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLastEntryForDate(dateString: String): WaterEntry?
 }

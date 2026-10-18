@@ -19,7 +19,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,12 +30,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -46,13 +43,16 @@ import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +65,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -76,20 +77,53 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.ui.ScannerState
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkCardElevated
 import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.ElectricLime
 import com.example.ui.theme.WildWatermelon
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
+import com.example.ui.theme.WildWatermelon
 import java.util.concurrent.Executors
+
+private fun isValidBarcode(raw: String): Boolean {
+    val code = raw.trim()
+    if (!code.all { it.isDigit() }) return false
+    if (code.length !in listOf(8, 12, 13)) return false
+    if (code.length == 13) {
+        var sum = 0
+        for (i in 0 until 12) {
+            val digit = code[i].digitToInt()
+            val weight = if (i % 2 == 0) 1 else 3
+            sum += digit * weight
+        }
+        val remainder = sum % 10
+        val checkDigit = if (remainder == 0) 0 else 10 - remainder
+        return checkDigit == code[12].digitToInt()
+    }
+    if (code.length == 8) {
+        var sum = 0
+        for (i in 0 until 7) {
+            val digit = code[i].digitToInt()
+            val weight = if (i % 2 == 0) 3 else 1
+            sum += digit * weight
+        }
+        val remainder = sum % 10
+        val checkDigit = if (remainder == 0) 0 else 10 - remainder
+        return checkDigit == code[7].digitToInt()
+    }
+    return true
+}
 
 @Composable
 fun BarcodeScannerDialog(
+    scannerState: ScannerState = ScannerState.Idle,
+    onResetScannerState: () -> Unit = {},
+    onOpenCreateProduct: (String) -> Unit = {},
     onDismiss: () -> Unit,
     onBarcodeScanned: (String) -> Unit
 ) {
@@ -130,7 +164,6 @@ fun BarcodeScannerDialog(
         }
     }
 
-    // Clean up camera on disposal to prevent buffer queue abandonment
     DisposableEffect(lifecycleOwner) {
         onDispose {
             try {
@@ -144,15 +177,6 @@ fun BarcodeScannerDialog(
         }
     }
 
-    val demoCodes = listOf(
-        "Творог 5%" to "4605432109876",
-        "Геркулес" to "4601234567890",
-        "Молоко 2.5%" to "4609876543210",
-        "Гречка" to "4607001234567",
-        "Авокадо" to "4606667778889",
-        "Хлеб ц/з" to "4603334445556"
-    )
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -162,13 +186,10 @@ fun BarcodeScannerDialog(
             color = DarkBackground
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Camera Preview using TextureView (COMPATIBLE mode) to avoid SurfaceView buffer queue abandonment
                 if (hasCameraPermission && cameraError == null) {
                     AndroidView(
                         factory = { ctx ->
                             val previewView = PreviewView(ctx).apply {
-                                // COMPATIBLE mode uses TextureView instead of SurfaceView,
-                                // which avoids "BufferQueue has been abandoned" on compose dialog transitions
                                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                             }
 
@@ -178,7 +199,6 @@ fun BarcodeScannerDialog(
                                     val cameraProvider = cameraProviderFuture.get()
                                     cameraProviderRef = cameraProvider
 
-                                    // Pick available camera
                                     val cameraSelector = when {
                                         cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
                                         cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
@@ -210,7 +230,32 @@ fun BarcodeScannerDialog(
                                     )
                                     camera = boundCamera
 
-                                    // Monitor camera state for errors
+                                    previewView.setOnTouchListener { view, event ->
+                                        if (event.action == android.view.MotionEvent.ACTION_DOWN) {
+                                            val factory = previewView.meteringPointFactory
+                                            val point = factory.createPoint(event.x, event.y)
+                                            val action = androidx.camera.core.FocusMeteringAction.Builder(point, androidx.camera.core.FocusMeteringAction.FLAG_AF)
+                                                .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
+                                                .build()
+                                            boundCamera.cameraControl.startFocusAndMetering(action)
+                                            view.performClick()
+                                        }
+                                        true
+                                    }
+
+                                    previewView.post {
+                                        try {
+                                            val factory = previewView.meteringPointFactory
+                                            val centerPoint = factory.createPoint(previewView.width / 2f, previewView.height / 2f)
+                                            val action = androidx.camera.core.FocusMeteringAction.Builder(centerPoint, androidx.camera.core.FocusMeteringAction.FLAG_AF)
+                                                .setAutoCancelDuration(2, java.util.concurrent.TimeUnit.SECONDS)
+                                                .build()
+                                            boundCamera.cameraControl.startFocusAndMetering(action)
+                                        } catch (e: Exception) {
+                                            // Ignore
+                                        }
+                                    }
+
                                     boundCamera.cameraInfo.cameraState.observe(lifecycleOwner) { state ->
                                         if (state.type == CameraState.Type.CLOSED && state.error != null) {
                                             cameraError = "Камера эмулятора недоступна"
@@ -227,7 +272,6 @@ fun BarcodeScannerDialog(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    // Fallback visual background when camera is disabled, in emulator or error
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -241,7 +285,7 @@ fun BarcodeScannerDialog(
                             Icon(
                                 imageVector = Icons.Default.QrCodeScanner,
                                 contentDescription = null,
-                                tint = ElectricLime,
+                                tint = WildWatermelon,
                                 modifier = Modifier.size(64.dp)
                             )
                             Spacer(modifier = Modifier.height(16.dp))
@@ -256,7 +300,7 @@ fun BarcodeScannerDialog(
                                 text = if (!hasCameraPermission)
                                     "Предоставьте доступ к камере или используйте ввод штрих-кода ниже"
                                 else
-                                    "В эмуляторе камера эмулируется. Вы можете быстро выбрать тестовый штрих-код или ввести его вручную.",
+                                    "Введите штрих-код товара вручную.",
                                 fontSize = 13.sp,
                                 color = TextSecondary,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -267,7 +311,7 @@ fun BarcodeScannerDialog(
                                     onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
                                     shape = RoundedCornerShape(12.dp),
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = ElectricLime,
+                                        containerColor = WildWatermelon,
                                         contentColor = Color(0xFF101014)
                                     )
                                 ) {
@@ -278,10 +322,50 @@ fun BarcodeScannerDialog(
                     }
                 }
 
-                // Laser Targeting Overlay & Viewfinder
+                // Laser Targeting Overlay
                 ViewfinderOverlay(modifier = Modifier.fillMaxSize())
 
-                // Top Controls Bar (Close, Title, Torch)
+                // Searching Card Overlay
+                if (scannerState is ScannerState.Searching) {
+                    val searchingCode = (scannerState as ScannerState.Searching).barcode
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.65f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(DarkCard)
+                                .border(1.dp, WildWatermelon, RoundedCornerShape(20.dp))
+                                .padding(24.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = WildWatermelon,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Поиск штрих-кода...",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = searchingCode,
+                                fontSize = 13.sp,
+                                color = WildWatermelon,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+                // Top Controls Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -330,12 +414,14 @@ fun BarcodeScannerDialog(
                         Icon(
                             imageVector = if (isTorchOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
                             contentDescription = "Фонарик",
-                            tint = if (isTorchOn) ElectricLime else TextSecondary
+                            tint = if (isTorchOn) WildWatermelon else TextSecondary
                         )
                     }
                 }
 
-                // Bottom Panel: Manual Entry & Demo Barcode Chips
+                // Bottom Panel: Manual Entry
+                val isManualInputValid = manualCodeInput.isBlank() || isValidBarcode(manualCodeInput)
+
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -346,44 +432,17 @@ fun BarcodeScannerDialog(
                         .clip(RoundedCornerShape(22.dp))
                         .background(DarkSurface.copy(alpha = 0.98f))
                         .border(1.dp, DarkBorder, RoundedCornerShape(22.dp))
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
                     Text(
-                        text = "Наведите камеру на штрих-код (UPC / EAN)",
-                        fontSize = 13.sp,
+                        text = "Наведите камеру на штрих-код (EAN-13 / EAN-8 / UPC)",
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = TextPrimary
                     )
-                    Text(
-                        text = "Или выберите пример для быстрой проверки:",
-                        fontSize = 11.sp,
-                        color = TextSecondary
-                    )
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // Demo Barcode Quick Chips
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(demoCodes) { (name, code) ->
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(DarkCardElevated)
-                                    .border(1.dp, WildWatermelon.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
-                                    .clickable { onBarcodeScanned(code) }
-                                    .padding(horizontal = 10.dp, vertical = 5.dp)
-                            ) {
-                                Column {
-                                    Text(text = name, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                                    Text(text = code, fontSize = 10.sp, color = WildWatermelon)
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Manual Barcode Input Field
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -396,6 +455,12 @@ fun BarcodeScannerDialog(
                             },
                             placeholder = { Text("Ввести код вручную...", fontSize = 12.sp, color = TextTertiary) },
                             singleLine = true,
+                            isError = !isManualInputValid,
+                            supportingText = {
+                                if (!isManualInputValid) {
+                                    Text("Некорректный штрих-код (8, 12 или 13 цифр)", color = Color(0xFFF87171), fontSize = 11.sp)
+                                }
+                            },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
@@ -403,7 +468,8 @@ fun BarcodeScannerDialog(
                                 .testTag("manual_barcode_input"),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = WildWatermelon,
-                                unfocusedBorderColor = DarkBorder,
+                                unfocusedBorderColor = com.example.ui.theme.OutlineStrong,
+                                errorBorderColor = Color(0xFFF87171),
                                 focusedTextColor = TextPrimary,
                                 unfocusedTextColor = TextPrimary,
                                 focusedContainerColor = DarkCard,
@@ -413,11 +479,11 @@ fun BarcodeScannerDialog(
 
                         Button(
                             onClick = {
-                                if (manualCodeInput.isNotBlank()) {
+                                if (manualCodeInput.isNotBlank() && isManualInputValid) {
                                     onBarcodeScanned(manualCodeInput.trim())
                                 }
                             },
-                            enabled = manualCodeInput.isNotBlank(),
+                            enabled = manualCodeInput.isNotBlank() && isManualInputValid,
                             shape = RoundedCornerShape(14.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = WildWatermelon,
@@ -432,6 +498,55 @@ fun BarcodeScannerDialog(
                             Text("Найти", fontWeight = FontWeight.Bold)
                         }
                     }
+                }
+
+                // In-Scanner "Not Found" Dialog
+                if (scannerState is ScannerState.NotFound) {
+                    val missingCode = (scannerState as ScannerState.NotFound).barcode
+                    AlertDialog(
+                        onDismissRequest = {
+                            onResetScannerState()
+                            analyzer.resume()
+                        },
+                        containerColor = DarkSurface,
+                        shape = RoundedCornerShape(20.dp),
+                        title = {
+                            Text("Штрих-код не найден", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = TextPrimary)
+                        },
+                        text = {
+                            Text(
+                                "Штрих-код $missingCode не найден в локальной базе и на сервере Open Food Facts.",
+                                fontSize = 13.sp,
+                                color = TextSecondary
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    onResetScannerState()
+                                    onDismiss()
+                                    onOpenCreateProduct(missingCode)
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = WildWatermelon,
+                                    contentColor = Color(0xFF101014)
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Создать продукт", fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    onResetScannerState()
+                                    analyzer.resume()
+                                }
+                            ) {
+                                Text("Сканировать ещё", color = TextSecondary)
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -455,7 +570,6 @@ private fun ViewfinderOverlay(modifier: Modifier = Modifier) {
         val w = size.width
         val h = size.height
 
-        // Reticle box dimensions in upper portion of screen
         val boxWidth = (w * 0.72f).coerceAtMost(300.dp.toPx())
         val boxHeight = (boxWidth * 0.65f).coerceAtMost(200.dp.toPx())
         val left = (w - boxWidth) / 2f
@@ -467,24 +581,18 @@ private fun ViewfinderOverlay(modifier: Modifier = Modifier) {
         val cornerStroke = 4.dp.toPx()
         val cornerColor = WildWatermelon
 
-        // Draw 4 corners
-        // Top-Left
         drawLine(cornerColor, Offset(left, top), Offset(left + cornerLength, top), cornerStroke, cap = StrokeCap.Round)
         drawLine(cornerColor, Offset(left, top), Offset(left, top + cornerLength), cornerStroke, cap = StrokeCap.Round)
 
-        // Top-Right
         drawLine(cornerColor, Offset(right, top), Offset(right - cornerLength, top), cornerStroke, cap = StrokeCap.Round)
         drawLine(cornerColor, Offset(right, top), Offset(right, top + cornerLength), cornerStroke, cap = StrokeCap.Round)
 
-        // Bottom-Left
         drawLine(cornerColor, Offset(left, bottom), Offset(left + cornerLength, bottom), cornerStroke, cap = StrokeCap.Round)
         drawLine(cornerColor, Offset(left, bottom), Offset(left, bottom - cornerLength), cornerStroke, cap = StrokeCap.Round)
 
-        // Bottom-Right
         drawLine(cornerColor, Offset(right, bottom), Offset(right - cornerLength, bottom), cornerStroke, cap = StrokeCap.Round)
         drawLine(cornerColor, Offset(right, bottom), Offset(right, bottom - cornerLength), cornerStroke, cap = StrokeCap.Round)
 
-        // Animated WildWatermelon laser line across reticle
         val laserY = top + (boxHeight * laserYRatio)
         drawLine(
             color = WildWatermelon,

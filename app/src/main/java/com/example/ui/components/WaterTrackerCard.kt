@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Opacity
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Icon
@@ -52,6 +51,7 @@ fun WaterTrackerCard(
     targetWaterMl: Int,
     onAddWater: (amountMl: Int) -> Unit,
     onRemoveLastWater: () -> Unit,
+    appLanguage: String = "ru",
     modifier: Modifier = Modifier
 ) {
     val progress = if (targetWaterMl > 0) {
@@ -104,13 +104,19 @@ fun WaterTrackerCard(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "Водный баланс",
+                        text = if (appLanguage == "en") "Water Tracker" else "Водный баланс",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextPrimary
+                        color = TextPrimary,
+                        maxLines = 1,
+                        softWrap = false
                     )
                     Text(
-                        text = if (remainingMl == 0) "Норма выполнена! 🎉" else "Осталось: $remainingMl мл",
+                        text = if (remainingMl == 0) {
+                            if (appLanguage == "en") "Goal reached! 🎉" else "Норма выполнена! 🎉"
+                        } else {
+                            if (appLanguage == "en") "$remainingMl ml remaining" else "Осталось: $remainingMl мл"
+                        },
                         fontSize = 11.sp,
                         color = if (remainingMl == 0) WaterAqua else TextSecondary,
                         maxLines = 1
@@ -130,7 +136,7 @@ fun WaterTrackerCard(
                     color = WaterAqua
                 )
                 Text(
-                    text = " / $targetWaterMl мл",
+                    text = if (appLanguage == "en") " / $targetWaterMl ml" else " / $targetWaterMl мл",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextSecondary,
@@ -169,13 +175,13 @@ fun WaterTrackerCard(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "$percent% от нормы",
+                text = if (appLanguage == "en") "$percent% of goal" else "$percent% от нормы",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
                 color = TextTertiary
             )
             Text(
-                text = "30 мл / кг веса",
+                text = if (appLanguage == "en") "30 ml / kg body weight" else "30 мл / кг веса",
                 fontSize = 11.sp,
                 color = TextTertiary
             )
@@ -189,10 +195,10 @@ fun WaterTrackerCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // +250 ml (Cup)
+            // +250 ml (Glass)
             WaterActionButton(
-                label = "+250 мл",
-                subtitle = "Стакан",
+                label = if (appLanguage == "en") "+250 ml" else "+250 мл",
+                subtitle = if (appLanguage == "en") "Glass" else "Стакан",
                 onClick = { onAddWater(250) },
                 modifier = Modifier
                     .weight(1f)
@@ -201,8 +207,8 @@ fun WaterTrackerCard(
 
             // +500 ml (Bottle)
             WaterActionButton(
-                label = "+500 мл",
-                subtitle = "Бутылка",
+                label = if (appLanguage == "en") "+500 ml" else "+500 мл",
+                subtitle = if (appLanguage == "en") "Bottle" else "Бутылка",
                 onClick = { onAddWater(500) },
                 modifier = Modifier
                     .weight(1f)
@@ -240,12 +246,16 @@ private fun WaterActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val view = androidx.compose.ui.platform.LocalView.current
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .background(WaterAquaContainer)
             .border(1.dp, WaterAqua.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-            .clickable { onClick() }
+            .clickable {
+                com.example.ui.util.HapticUtil.performClick(view)
+                onClick()
+            }
             .padding(horizontal = 12.dp, vertical = 9.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically

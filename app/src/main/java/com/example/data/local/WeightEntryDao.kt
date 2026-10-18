@@ -18,6 +18,9 @@ interface WeightEntryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateWeight(entry: WeightEntry)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEntries(entries: List<WeightEntry>)
+
     @Query("DELETE FROM weight_entries WHERE dateString = :dateString")
     suspend fun deleteWeightForDate(dateString: String)
 }

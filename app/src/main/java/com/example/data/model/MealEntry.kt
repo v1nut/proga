@@ -3,11 +3,13 @@ package com.example.data.model
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-enum class MealType(val titleRu: String) {
-    BREAKFAST("Завтрак"),
-    LUNCH("Обед"),
-    DINNER("Ужин"),
-    SNACK("Перекусы");
+enum class MealType(val titleRu: String, val titleEn: String) {
+    BREAKFAST("Завтрак", "Breakfast"),
+    LUNCH("Обед", "Lunch"),
+    DINNER("Ужин", "Dinner"),
+    SNACK("Перекус", "Snack");
+
+    fun title(lang: String = "ru"): String = if (lang == "en") titleEn else titleRu
 
     companion object {
         fun fromString(value: String): MealType {

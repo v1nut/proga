@@ -6,15 +6,18 @@ import com.example.data.local.InitialData
 import com.example.data.model.ActivityLevel
 import com.example.data.model.FitnessGoal
 import com.example.data.model.Gender
+import com.example.data.model.KbzhuBackupData
 import com.example.data.model.MealEntry
 import com.example.data.model.Product
+import com.example.data.model.SavedMeal
 import com.example.data.model.UserProfile
 import com.example.data.model.WaterEntry
 import com.example.data.model.WeightEntry
+import androidx.room.withTransaction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
 
 class KbzhuRepository(private val database: AppDatabase) {
 
@@ -23,15 +26,90 @@ class KbzhuRepository(private val database: AppDatabase) {
     private val userProfileDao = database.userProfileDao()
     private val waterEntryDao = database.waterEntryDao()
     private val weightEntryDao = database.weightEntryDao()
+    private val savedMealDao = database.savedMealDao()
 
     val allProducts: Flow<List<Product>> = productDao.getAllProducts()
+    val recentProducts: Flow<List<Product>> = productDao.getRecentProducts()
     val userProfile: Flow<UserProfile?> = userProfileDao.getUserProfile()
     val allWeightEntries: Flow<List<WeightEntry>> = weightEntryDao.getAllWeightEntries()
+    val allSavedMeals: Flow<List<SavedMeal>> = savedMealDao.getAllSavedMeals()
+
+    private val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+    private val savedMealItemListAdapter = moshi.adapter<List<com.example.data.model.SavedMealItem>>(
+        com.squareup.moshi.Types.newParameterizedType(List::class.java, com.example.data.model.SavedMealItem::class.java)
+    )
+
+    suspend fun setProductFavorite(productId: Long, isFavorite: Boolean) = withContext(Dispatchers.IO) {
+        productDao.setFavorite(productId, isFavorite)
+    }
+
+    suspend fun saveMealAsDish(name: String, entries: List<MealEntry>) = withContext(Dispatchers.IO) {
+        val items = entries.map {
+            com.example.data.model.SavedMealItem(
+                productId = it.productId,
+                productName = it.productName,
+                weightGrams = it.weightGrams,
+                calories = it.calories,
+                protein = it.protein,
+                fat = it.fat,
+                carbs = it.carbs
+            )
+        }
+        val json = savedMealItemListAdapter.toJson(items)
+        val savedMeal = SavedMeal(name = name.trim(), itemsJson = json)
+        savedMealDao.insertSavedMeal(savedMeal)
+    }
+
+    suspend fun deleteSavedMeal(meal: SavedMeal) = withContext(Dispatchers.IO) {
+        savedMealDao.deleteSavedMeal(meal)
+    }
+
+    fun parseSavedMealItems(itemsJson: String): List<com.example.data.model.SavedMealItem> {
+        return try {
+            savedMealItemListAdapter.fromJson(itemsJson) ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun cleanInvalidDateEntries(): Int = withContext(Dispatchers.IO) {
+        val globPattern = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+        var deletedCount = 0
+
+        database.withTransaction {
+            try {
+                deletedCount += database.compileStatement(
+                    "DELETE FROM meal_entries WHERE dateString NOT GLOB '$globPattern'"
+                ).executeUpdateDelete()
+
+                deletedCount += database.compileStatement(
+                    "DELETE FROM water_entries WHERE dateString NOT GLOB '$globPattern'"
+                ).executeUpdateDelete()
+
+                deletedCount += database.compileStatement(
+                    "DELETE FROM weight_entries WHERE dateString NOT GLOB '$globPattern'"
+                ).executeUpdateDelete()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        deletedCount
+    }
 
     suspend fun initializeIfNeeded() = withContext(Dispatchers.IO) {
+        cleanInvalidDateEntries()
+
         val count = productDao.getCount()
         if (count == 0) {
             productDao.insertAll(InitialData.predefinedProducts)
+        } else {
+            val existingList = productDao.getAllProducts().first()
+            val existingNames = existingList.map { it.name.lowercase() }.toSet()
+            val missing = InitialData.predefinedProducts.filter { !existingNames.contains(it.name.lowercase()) }
+            if (missing.isNotEmpty()) {
+                productDao.insertAll(missing)
+            }
         }
 
         val existingProfile = userProfileDao.getProfileSync()
@@ -61,23 +139,10 @@ class KbzhuRepository(private val database: AppDatabase) {
             userProfileDao.insertOrUpdate(defaultProfile)
         }
 
-        // Initialize 30 days of weight records if empty
-        val today = java.time.LocalDate.now()
-        val start30 = today.minusDays(29)
-        // Seed 30-day weight history with realistic fluctuations
-        val profile = userProfileDao.getProfileSync() ?: UserProfile()
-        val currentKg = profile.weightKg
-        val entries = (0..29).map { i ->
-            val date = start30.plusDays(i.toLong()).toString()
-            // Trend smoothly from +2.4 kg 30 days ago to currentKg today with slight daily realistic jitter
-            val progressRatio = i / 29.0
-            val noise = ((i * 7) % 5 - 2) * 0.12 // -0.24 to +0.24 kg
-            val baseWeight = (currentKg + 2.4) - (progressRatio * 2.4) + noise
-            val rounded = (baseWeight * 10).roundToInt() / 10.0
-            com.example.data.model.WeightEntry(dateString = date, weightKg = rounded)
-        }
-        entries.forEach { entry ->
-            weightEntryDao.insertOrUpdateWeight(entry)
+        if (weightEntryDao.getAllWeightEntries().first().isEmpty()) {
+            val profile = userProfileDao.getProfileSync() ?: UserProfile()
+            val today = java.time.LocalDate.now().toString()
+            weightEntryDao.insertOrUpdateWeight(WeightEntry(dateString = today, weightKg = profile.weightKg))
         }
     }
 
@@ -93,6 +158,12 @@ class KbzhuRepository(private val database: AppDatabase) {
         mealEntryDao.insertEntry(entry)
     }
 
+    suspend fun addMealEntries(entries: List<MealEntry>): List<Long> = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            mealEntryDao.insertEntries(entries)
+        }
+    }
+
     suspend fun updateMealEntry(entry: MealEntry) = withContext(Dispatchers.IO) {
         mealEntryDao.updateEntry(entry)
     }
@@ -103,6 +174,14 @@ class KbzhuRepository(private val database: AppDatabase) {
 
     suspend fun deleteMealEntryById(id: Long) = withContext(Dispatchers.IO) {
         mealEntryDao.deleteEntryById(id)
+    }
+
+    suspend fun deleteMealEntriesByIds(ids: List<Long>) = withContext(Dispatchers.IO) {
+        if (ids.isNotEmpty()) {
+            database.withTransaction {
+                mealEntryDao.deleteByIds(ids)
+            }
+        }
     }
 
     fun getTotalWaterForDate(dateString: String): Flow<Int?> {
@@ -117,11 +196,27 @@ class KbzhuRepository(private val database: AppDatabase) {
         waterEntryDao.deleteLastEntryForDate(dateString)
     }
 
+    suspend fun removeLastWaterWithReturn(dateString: String): WaterEntry? = withContext(Dispatchers.IO) {
+        val last = waterEntryDao.getLastEntryForDate(dateString)
+        if (last != null) {
+            waterEntryDao.deleteEntry(last)
+        }
+        last
+    }
+
+    suspend fun restoreWaterEntry(entry: WaterEntry) = withContext(Dispatchers.IO) {
+        waterEntryDao.insertEntry(entry)
+    }
+
     suspend fun findProductByBarcode(barcode: String): Product? = withContext(Dispatchers.IO) {
         productDao.findProductByBarcode(barcode.trim())
     }
 
     suspend fun insertProduct(product: Product): Long = withContext(Dispatchers.IO) {
+        productDao.insertProduct(product)
+    }
+
+    suspend fun updateProduct(product: Product) = withContext(Dispatchers.IO) {
         productDao.insertProduct(product)
     }
 
@@ -156,8 +251,122 @@ class KbzhuRepository(private val database: AppDatabase) {
     }
 
     suspend fun logWeight(dateString: String, weightKg: Double, note: String = "") = withContext(Dispatchers.IO) {
-        weightEntryDao.insertOrUpdateWeight(com.example.data.model.WeightEntry(dateString = dateString, weightKg = weightKg, note = note))
-        val profile = userProfileDao.getProfileSync() ?: UserProfile()
-        userProfileDao.insertOrUpdate(profile.copy(weightKg = weightKg))
+        weightEntryDao.insertOrUpdateWeight(WeightEntry(dateString = dateString, weightKg = weightKg, note = note))
+        if (dateString == java.time.LocalDate.now().toString()) {
+            val profile = userProfileDao.getProfileSync() ?: UserProfile()
+            val updatedProfile = if (!profile.isManualTarget) {
+                val genderEnum = try { Gender.valueOf(profile.gender) } catch (e: Exception) { Gender.MALE }
+                val activityEnum = try { ActivityLevel.valueOf(profile.activityLevel) } catch (e: Exception) { ActivityLevel.MODERATE }
+                val goalEnum = try { FitnessGoal.valueOf(profile.goal) } catch (e: Exception) { FitnessGoal.MAINTENANCE }
+                val calc = KbzhuCalculator.calculate(
+                    gender = genderEnum,
+                    age = profile.age,
+                    heightCm = profile.heightCm,
+                    weightKg = weightKg,
+                    activityLevel = activityEnum,
+                    goal = goalEnum
+                )
+                profile.copy(
+                    weightKg = weightKg,
+                    targetCalories = calc.targetCalories,
+                    targetProtein = calc.targetProtein,
+                    targetFat = calc.targetFat,
+                    targetCarbs = calc.targetCarbs
+                )
+            } else {
+                profile.copy(weightKg = weightKg)
+            }
+            userProfileDao.insertOrUpdate(updatedProfile)
+        }
+    }
+
+    suspend fun deleteWeightForDate(dateString: String) = withContext(Dispatchers.IO) {
+        weightEntryDao.deleteWeightForDate(dateString)
+    }
+
+    suspend fun createBackupData(prefs: android.content.SharedPreferences): KbzhuBackupData = withContext(Dispatchers.IO) {
+        val profile = userProfileDao.getProfileSync()
+        val products = productDao.getAllProducts().first()
+        val meals = mealEntryDao.getAllEntries().first()
+        val water = waterEntryDao.getAllEntries().first()
+        val weight = weightEntryDao.getAllWeightEntries().first()
+        val savedMeals = savedMealDao.getAllSavedMeals().first()
+
+        val settings = com.example.data.model.BackupSettings(
+            isManualWaterTarget = prefs.getBoolean("is_manual_water_target", false),
+            customTargetWaterMl = prefs.getInt("custom_target_water_ml", 2000),
+            appThemeMode = prefs.getString("app_theme_mode", "dark") ?: "dark",
+            appLanguage = prefs.getString("app_language", "ru") ?: "ru",
+            notificationsEnabled = prefs.getBoolean(com.example.notification.InactivityReminderManager.KEY_NOTIFICATIONS_ENABLED, true),
+            intervalHours = prefs.getInt(com.example.notification.InactivityReminderManager.KEY_INTERVAL_HOURS, 4),
+            tierListMode = prefs.getString("tier_list_mode", "auto") ?: "auto",
+            autoSaveAiProducts = prefs.getBoolean("auto_save_ai_products", false)
+        )
+
+        KbzhuBackupData(
+            format = "kbzhu-backup",
+            versionScheme = 6,
+            exportDate = java.time.LocalDate.now().toString(),
+            userProfile = profile,
+            products = products,
+            mealEntries = meals,
+            waterEntries = water,
+            weightEntries = weight,
+            savedMeals = savedMeals,
+            settings = settings
+        )
+    }
+
+    suspend fun restoreBackupData(data: KbzhuBackupData, prefs: android.content.SharedPreferences) = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            if (data.userProfile != null) {
+                userProfileDao.insertOrUpdate(data.userProfile)
+            }
+            if (data.products != null) {
+                database.openHelper.writableDatabase.compileStatement("DELETE FROM products").execute()
+                if (data.products.isNotEmpty()) {
+                    productDao.insertAll(data.products)
+                }
+            }
+            if (data.mealEntries != null) {
+                database.openHelper.writableDatabase.compileStatement("DELETE FROM meal_entries").execute()
+                if (data.mealEntries.isNotEmpty()) {
+                    mealEntryDao.insertEntries(data.mealEntries)
+                }
+            }
+            if (data.waterEntries != null) {
+                database.openHelper.writableDatabase.compileStatement("DELETE FROM water_entries").execute()
+                if (data.waterEntries.isNotEmpty()) {
+                    waterEntryDao.insertEntries(data.waterEntries)
+                }
+            }
+            if (data.weightEntries != null) {
+                database.openHelper.writableDatabase.compileStatement("DELETE FROM weight_entries").execute()
+                if (data.weightEntries.isNotEmpty()) {
+                    weightEntryDao.insertEntries(data.weightEntries)
+                }
+            }
+            if (data.savedMeals != null) {
+                database.openHelper.writableDatabase.compileStatement("DELETE FROM saved_meals").execute()
+                if (data.savedMeals.isNotEmpty()) {
+                    for (meal in data.savedMeals) {
+                        savedMealDao.insertSavedMeal(meal)
+                    }
+                }
+            }
+        }
+
+        if (data.settings != null) {
+            prefs.edit()
+                .putBoolean("is_manual_water_target", data.settings.isManualWaterTarget)
+                .putInt("custom_target_water_ml", data.settings.customTargetWaterMl)
+                .putString("app_theme_mode", data.settings.appThemeMode)
+                .putString("app_language", data.settings.appLanguage)
+                .putBoolean(com.example.notification.InactivityReminderManager.KEY_NOTIFICATIONS_ENABLED, data.settings.notificationsEnabled)
+                .putInt(com.example.notification.InactivityReminderManager.KEY_INTERVAL_HOURS, data.settings.intervalHours)
+                .putString("tier_list_mode", data.settings.tierListMode)
+                .putBoolean("auto_save_ai_products", data.settings.autoSaveAiProducts)
+                .apply()
+        }
     }
 }

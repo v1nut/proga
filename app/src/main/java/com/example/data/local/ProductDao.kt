@@ -13,6 +13,19 @@ interface ProductDao {
     @Query("SELECT * FROM products ORDER BY name ASC")
     fun getAllProducts(): Flow<List<Product>>
 
+    @Query("""
+        SELECT p.* FROM products p
+        INNER JOIN (
+            SELECT productId, MAX(id) as max_id 
+            FROM meal_entries 
+            WHERE productId IS NOT NULL 
+            GROUP BY productId
+        ) m ON p.id = m.productId
+        ORDER BY m.max_id DESC
+        LIMIT 30
+    """)
+    fun getRecentProducts(): Flow<List<Product>>
+
     @Query("SELECT * FROM products WHERE name LIKE '%' || :query || '%' OR category LIKE '%' || :query || '%' ORDER BY name ASC")
     fun searchProducts(query: String): Flow<List<Product>>
 
@@ -30,6 +43,12 @@ interface ProductDao {
 
     @Query("SELECT COUNT(*) FROM products")
     suspend fun getCount(): Int
+
+    @Query("SELECT * FROM products WHERE isFavorite = 1 ORDER BY name ASC")
+    fun getFavoriteProducts(): Flow<List<Product>>
+
+    @Query("UPDATE products SET isFavorite = :isFavorite WHERE id = :productId")
+    suspend fun setFavorite(productId: Long, isFavorite: Boolean)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProduct(product: Product): Long

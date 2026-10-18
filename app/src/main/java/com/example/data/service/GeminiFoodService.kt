@@ -1,5 +1,6 @@
 package com.example.data.service
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Base64
 import com.example.BuildConfig
@@ -14,7 +15,25 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import kotlin.math.roundToInt
+
+sealed class AiError(val userMessage: String) {
+    object NoNetwork : AiError("Нет интернета. Проверьте подключение к сети.")
+    object Timeout : AiError("ИИ не ответил вовремя, попробуйте ещё раз.")
+    object NotConfigured : AiError("Укажите API-ключ Gemini в Настройках приложения.")
+    object QuotaExceeded : AiError("Превышен лимит запросов ИИ, попробуйте позже.")
+    object BadResponse : AiError("Некорректный ответ от ИИ.")
+    data class Unknown(val detailMessage: String = "Неизвестная ошибка ИИ.") : AiError(detailMessage)
+}
+
+class AiException(val error: AiError) : Exception(error.userMessage)
 
 data class RecognizedMealItem(
     val name: String,
@@ -35,52 +54,142 @@ data class RecognizedMeal(
     val mealType: MealType = MealType.LUNCH,
     val confidence: String = "Высокая",
     val description: String = "",
-    val items: List<RecognizedMealItem> = emptyList()
+    val items: List<RecognizedMealItem> = emptyList(),
+    val isEstimate: Boolean = false,
+    val unrecognizedItems: List<String> = emptyList()
 )
 
-data class ScienceNutritionAdvice(
+data class ProductScienceInfo(
     val productName: String,
     val summary: String,
     val healthBenefits: List<String>,
-    val scientificEvidence: String,
+    val generalInfo: String,
     val recommendedIntake: String,
     val glycemicImpact: String,
     val cautions: String
 )
 
-class GeminiFoodService {
+class GeminiFoodService(private val context: Context? = null) {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    private val photoClient = client.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .writeTimeout(35, TimeUnit.SECONDS)
         .build()
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
+    private fun getApiKey(): String {
+        val customKey = if (context != null) {
+            com.example.data.security.EncryptedPrefs.getGeminiApiKey(context)
+        } else ""
+
+        if (customKey.isNotBlank()) {
+            return customKey
+        }
+
+        val buildKey = try { BuildConfig.GEMINI_API_KEY.trim() } catch (e: Exception) { "" }
+        if (buildKey.isNotBlank() && buildKey != "dummy_key" && buildKey != "YOUR_API_KEY" && buildKey != "null") {
+            return buildKey
+        }
+        return ""
+    }
+
+    private fun executeGeminiRequest(
+        apiKey: String,
+        promptJson: JSONObject,
+        isPhoto: Boolean = false
+    ): Pair<Int, String> {
+        val candidateModels = listOf("gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
+        val activeClient = if (isPhoto) photoClient else client
+        val body = promptJson.toString().toRequestBody(jsonMediaType)
+
+        var lastCode = 500
+        var lastBody = ""
+
+        for (model in candidateModels) {
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("x-goog-api-key", apiKey)
+                .post(body)
+                .build()
+
+            try {
+                val response = activeClient.newCall(request).execute()
+                lastCode = response.code
+                lastBody = response.body?.string() ?: ""
+
+                if (response.isSuccessful) {
+                    return Pair(lastCode, lastBody)
+                }
+
+                if (lastCode == 401 || lastCode == 403 || lastCode == 400) {
+                    return Pair(lastCode, lastBody)
+                }
+
+                if (lastCode == 404 || lastCode == 429 || lastCode == 503) {
+                    continue
+                }
+
+                return Pair(lastCode, lastBody)
+            } catch (e: Exception) {
+                if (BuildConfig.DEBUG) {
+                    android.util.Log.e("GEMINI_FALLBACK", "Model $model network exception", e)
+                }
+            }
+        }
+        return Pair(lastCode, lastBody)
+    }
+
     suspend fun analyzeMealPhoto(bitmap: Bitmap): Result<RecognizedMeal> = withContext(Dispatchers.IO) {
         try {
             val apiKey = getApiKey()
-            val base64Image = bitmapToBase64(bitmap)
-
             if (apiKey.isBlank()) {
-                return@withContext Result.success(fallbackPhotoAnalysis(bitmap))
+                return@withContext Result.failure(AiException(AiError.NotConfigured))
             }
 
+            val base64Image = bitmapToBase64(bitmap)
             val prompt = """
                 Ты эксперт-диетолог и нутрициолог.
-                Внимательно проанализируй это фото блюда.
-                Определи название блюда на русском языке, ориентировочную массу порции в граммах, калории и макронутриенты (белки, жиры, углеводы на указанный вес), а также подходящий прием пищи (BREAKFAST, LUNCH, DINNER, SNACK).
-                Верни ответ ИСКЛЮЧИТЕЛЬНО в формате чистого JSON без markdown-кавычек:
+                Внимательно проанализируй это фото блюда или комплексного приёма пищи.
+                СТРОГОЕ ПРАВИЛО: Если на фото расположено несколько отдельных продуктов или блюд (например: суп, котлета, гарнир, салат, хлеб, напиток), ОДНОЗНАЧНО РАЗДЕЛИ их на ОТДЕЛЬНЫЕ независимые элементы в массиве "items" с индивидуальным названием на русском языке, весом в граммах, калориями и БЖУ для каждого продукта.
+                Верни ответ ИСКЛЮЧИТЕЛЬНО в формате чистого JSON:
                 {
-                    "dishName": "Название блюда",
-                    "estimatedGrams": 250,
-                    "calories": 380,
-                    "protein": 22.0,
-                    "fat": 12.0,
-                    "carbs": 42.0,
+                    "dishName": "Общее название приёма пищи",
+                    "estimatedGrams": 450,
+                    "calories": 650,
+                    "protein": 35.0,
+                    "fat": 20.0,
+                    "carbs": 75.0,
                     "mealType": "LUNCH",
                     "confidence": "Высокая",
-                    "description": "Краткое описание ингредиентов"
+                    "description": "Описание комплексного приёма пищи",
+                    "items": [
+                        {
+                            "name": "Блюдо/Продукт 1",
+                            "grams": 200,
+                            "calories": 300,
+                            "protein": 20.0,
+                            "fat": 10.0,
+                            "carbs": 30.0
+                        },
+                        {
+                            "name": "Блюдо/Продукт 2",
+                            "grams": 150,
+                            "calories": 200,
+                            "protein": 10.0,
+                            "fat": 8.0,
+                            "carbs": 25.0
+                        }
+                    ]
                 }
             """.trimIndent()
 
@@ -104,20 +213,19 @@ class GeminiFoodService {
                 put("contents", contents)
             }
 
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
-            val body = requestJson.toString().toRequestBody(jsonMediaType)
-            val request = Request.Builder().url(url).post(body).build()
-
-            val response = client.newCall(request).execute()
-            val responseCode = response.code
-            val responseString = response.body?.string() ?: ""
-
-            if (responseCode == 429 || responseString.contains("RESOURCE_EXHAUSTED", ignoreCase = true) || responseString.contains("quota", ignoreCase = true)) {
-                return@withContext Result.failure(Exception("Превышен лимит API Gemini (20 запросов/день или 429 Quota). Вы можете ввести параметры блюда вручную."))
+            val (responseCode, responseString) = try {
+                executeGeminiRequest(apiKey, requestJson, isPhoto = true)
+            } catch (e: Exception) {
+                return@withContext Result.failure(mapExceptionToAiException(e))
             }
 
-            if (!response.isSuccessful) {
-                return@withContext Result.success(fallbackPhotoAnalysis(bitmap))
+            if (responseCode != 200) {
+                val err = when (responseCode) {
+                    429 -> AiError.QuotaExceeded
+                    401, 403 -> AiError.NotConfigured
+                    else -> AiError.BadResponse
+                }
+                return@withContext Result.failure(AiException(err))
             }
 
             val rawText = extractTextFromGeminiResponse(responseString)
@@ -125,56 +233,47 @@ class GeminiFoodService {
             val parsed = parseRecognizedMealJson(cleanJson)
             Result.success(parsed)
         } catch (e: Exception) {
-            e.printStackTrace()
-            Result.success(fallbackPhotoAnalysis(bitmap))
+            if (BuildConfig.DEBUG) {
+                e.printStackTrace()
+            }
+            Result.failure(mapExceptionToAiException(e))
         }
     }
 
     suspend fun parseQuickMealText(userInput: String): Result<RecognizedMeal> = withContext(Dispatchers.IO) {
-        try {
-            val apiKey = getApiKey()
-            if (apiKey.isBlank()) {
-                return@withContext Result.success(fallbackQuickTextAnalysis(userInput))
+        val apiKey = getApiKey()
+        if (apiKey.isBlank()) {
+            val fallback = fallbackQuickTextAnalysis(userInput)
+            if (fallback.items.isNotEmpty()) {
+                return@withContext Result.success(fallback)
             }
+            return@withContext Result.failure(AiException(AiError.NotConfigured))
+        }
 
+        try {
             val prompt = """
-                Ты эксперт-диетолог и умный парсер приёмов пищи для фитнес-трекера.
+                Ты эксперт-диетолог и умный двуязычный (RU + EN) парсер приёмов пищи для фитнес-трекера.
                 Пользователь ввёл фразу: "$userInput"
-                Внимательно определи ВСЕ продукты и блюда (их может быть несколько, например "яйцо и творог", "овсянка 200г на завтрак", "2 яйца и кофе").
-
-                Правила:
-                1. Если количество яиц не указано ("яйцо"), считай ровно 1 штуку (55г), а НЕ 2.
-                2. Если граммовка или порция не указана явно, используй стандартную порцию: творог 150г, овсянка 200г, банан 120г, куриное филе 180г, кофе 200мл, яблоко 150г.
-                3. Определи приём пищи (BREAKFAST, LUNCH, DINNER или SNACK) на основе контекста или ключевых слов ("на завтрак", "на обед", "на ужин").
-                4. Рассчитай точные КБЖУ для КАЖДОГО продукта и общую сумму.
-
-                Верни СТРОГО чистый JSON без markdown:
+                Внимательно определи ВСЕ продукты и блюда на русском или английском языке.
+                Верни ответ ИСКЛЮЧИТЕЛЬНО в формате чистого JSON:
                 {
                     "mealType": "BREAKFAST",
-                    "dishName": "Название или перечисление продуктов",
-                    "estimatedGrams": 205,
-                    "calories": 259,
-                    "protein": 30.5,
-                    "fat": 13.0,
-                    "carbs": 4.9,
+                    "dishName": "Название блюда",
+                    "estimatedGrams": 200,
+                    "calories": 250,
+                    "protein": 15.0,
+                    "fat": 8.0,
+                    "carbs": 30.0,
                     "confidence": "Высокая",
                     "description": "Краткое описание",
                     "items": [
                         {
-                            "name": "Яйцо куриное (1 шт)",
-                            "grams": 55,
-                            "calories": 78,
-                            "protein": 6.5,
-                            "fat": 5.5,
-                            "carbs": 0.4
-                        },
-                        {
-                            "name": "Творог 5%",
-                            "grams": 150,
-                            "calories": 181,
-                            "protein": 24.0,
-                            "fat": 7.5,
-                            "carbs": 4.5
+                            "name": "Название продукта",
+                            "grams": 200,
+                            "calories": 250,
+                            "protein": 15.0,
+                            "fat": 8.0,
+                            "carbs": 30.0
                         }
                     ]
                 }
@@ -193,52 +292,418 @@ class GeminiFoodService {
                 put("contents", contents)
             }
 
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
-            val body = requestJson.toString().toRequestBody(jsonMediaType)
-            val request = Request.Builder().url(url).post(body).build()
+            val (responseCode, responseString) = try {
+                executeGeminiRequest(apiKey, requestJson, isPhoto = false)
+            } catch (e: Exception) {
+                if (BuildConfig.DEBUG) {
+                    android.util.Log.e("GEMINI_ERROR", "Network failure, trying fallback", e)
+                }
+                val fallback = fallbackQuickTextAnalysis(userInput)
+                if (fallback.items.isNotEmpty()) {
+                    return@withContext Result.success(fallback)
+                }
+                return@withContext Result.failure(mapExceptionToAiException(e))
+            }
 
-            val response = client.newCall(request).execute()
-            val responseString = response.body?.string() ?: ""
-
-            if (!response.isSuccessful) {
-                return@withContext Result.success(fallbackQuickTextAnalysis(userInput))
+            if (responseCode != 200) {
+                val fallback = fallbackQuickTextAnalysis(userInput)
+                if (fallback.items.isNotEmpty()) {
+                    return@withContext Result.success(fallback)
+                }
+                val err = when (responseCode) {
+                    429 -> AiError.QuotaExceeded
+                    401, 403 -> AiError.NotConfigured
+                    else -> AiError.BadResponse
+                }
+                return@withContext Result.failure(AiException(err))
             }
 
             val rawText = extractTextFromGeminiResponse(responseString)
             val cleanJson = cleanJsonString(rawText)
-            val parsed = parseRecognizedMealJson(cleanJson)
+            val parsed = try {
+                parseRecognizedMealJson(cleanJson)
+            } catch (e: Exception) {
+                val fallback = fallbackQuickTextAnalysis(userInput)
+                if (fallback.items.isNotEmpty()) fallback else throw e
+            }
             Result.success(parsed)
         } catch (e: Exception) {
-            e.printStackTrace()
-            Result.success(fallbackQuickTextAnalysis(userInput))
+            if (BuildConfig.DEBUG) {
+                e.printStackTrace()
+            }
+            val fallback = fallbackQuickTextAnalysis(userInput)
+            if (fallback.items.isNotEmpty()) {
+                return@withContext Result.success(fallback)
+            }
+            Result.failure(mapExceptionToAiException(e))
         }
     }
 
-    suspend fun getNutritionalScienceAdvice(product: Product): Result<ScienceNutritionAdvice> = withContext(Dispatchers.IO) {
+    fun getCuratedLocalScienceInfo(product: Product): ProductScienceInfo? {
+        val lower = product.name.lowercase().trim()
+
+        return when {
+            // 1. Chicken / Курица / Филе
+            lower.contains("куриц") || lower.contains("курин") || lower.contains("цыплен") || lower.contains("chicken") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Куриное филе — ценный диетический источник белка с высоким содержанием аминокислот и минимальным количеством жиров.",
+                    healthBenefits = listOf(
+                        "Полноценный легкоусвояемый белок для роста и восстановления мышц",
+                        "Богат витаминами группы B (B3, B6, B12) и фосфором"
+                    ),
+                    generalInfo = "Содержит около ${product.protein}г белка и ${product.calories.roundToInt()} ккал на 100 г.",
+                    recommendedIntake = "150-200 г в один приём пищи",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 2. Turkey / Индейка
+            lower.contains("индейк") || lower.contains("turkey") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Филе индейки — нежирное гипоаллергенное мясо с богатым аминокислотным профилем и высоким содержанием триптофана.",
+                    healthBenefits = listOf(
+                        "Низкое содержание насыщенных жиров и холестерина",
+                        "Содержит селен и триптофан, улучшающие качество сна и настроение"
+                    ),
+                    generalInfo = "Содержит порядка ${product.protein}г белка на 100 г с мизерным содержанием жира.",
+                    recommendedIntake = "150-200 г в порции",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 3. Beef / Говядина
+            lower.contains("говяд") || lower.contains("beef") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Постная говядина — ключевой источник гемового железа, цинка и креатина для кроветворения и силовой выносливости.",
+                    healthBenefits = listOf(
+                        "Высокая биодоступность гемового железа для профилактики анемии",
+                        "Содержит цинк, B12 и природный креатин"
+                    ),
+                    generalInfo = "Обеспечивает ${product.protein}г качественного белка на 100 г.",
+                    recommendedIntake = "120-180 г 2-3 раза в неделю",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "При заболеваниях почек стоит контролировать порцию"
+                )
+
+            // 4. Salmon / Лосось / Сёмга / Горбуша / Рыба
+            lower.contains("лосось") || lower.contains("семга") || lower.contains("горбуш") || lower.contains("salmon") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Красная рыба — богатейший источник омега-3 полиненасыщенных жирных кислот и витамина D для здоровья сердца и сосудов.",
+                    healthBenefits = listOf(
+                        "Омега-3 Кислоты (EPA/DHA) снижают уровень системного воспаления",
+                        "Высокое содержание легкоусвояемого белка и витамина D"
+                    ),
+                    generalInfo = "Содержит ${product.protein}г белка и ${product.fat}г полезных жиров на 100 г.",
+                    recommendedIntake = "130-180 г 2 раза в неделю",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 5. Tuna / Тунец
+            lower.contains("тунец") || lower.contains("tuna") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Тунец — высокобелковая морская рыба с практически нулевым содержанием жира.",
+                    healthBenefits = listOf(
+                        "Максимальная концентрация белка на калорию",
+                        "Источник селена и витаминов группы B"
+                    ),
+                    generalInfo = "Содержит до ${product.protein}г белка на 100 г порции.",
+                    recommendedIntake = "100-150 г",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Умеренное употребление консервов"
+                )
+
+            // 6. Pollack / Минтай
+            lower.contains("минта") || lower.contains("pollock") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Минтай — нежирная белая рыба с мягким диетическим профилем и высоким содержанием йода.",
+                    healthBenefits = listOf(
+                        "Легко усваивается, идеально подходит для диетического питания",
+                        "Богат йодом, фосфором и кобальтом"
+                    ),
+                    generalInfo = "Содержит ${product.protein}г белка и меньше 1г жира на 100г.",
+                    recommendedIntake = "150-200 г",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 7. Buckwheat / Гречка
+            lower.contains("гречк") || lower.contains("гречн") || lower.contains("buckwheat") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Гречневая крупа — уникальный ценный злак с низким гликемическим индексом, богатый растительным белком и рутином.",
+                    healthBenefits = listOf(
+                        "Не содержит глютен, содержит медленные углеводы для долгой сытости",
+                        "Богата магнием, железом и флавоноидами"
+                    ),
+                    generalInfo = "Обеспечивает ${product.carbs}г сложных углеводов и ${product.protein}г белка на 100г.",
+                    recommendedIntake = "150-200 г в готовом виде",
+                    glycemicImpact = "Низкий (40-50)",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 8. Rice / Рис
+            lower.contains("рис") || lower.contains("rice") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Отварной рис — классический гипоаллергенный источник углеводов для восполнения гликогена.",
+                    healthBenefits = listOf(
+                        "Легко усваивается и не раздражает слизистую ЖКТ",
+                        "Сложные углеводы обеспечивают равномерный приток энергии"
+                    ),
+                    generalInfo = "Содержит ${product.carbs}г углеводов на 100 г готового блюда.",
+                    recommendedIntake = "150-200 г в готовом виде",
+                    glycemicImpact = "Средний",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 9. Oats / Овсянка / Геркулес
+            lower.contains("овсян") || lower.contains("геркулес") || lower.contains("oat") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Овсяные хлопья — идеальный вариант для завтрака, богатый растворимой клетчаткой (бета-глюканом).",
+                    healthBenefits = listOf(
+                        "Бета-глюкан снижает уровень холестерина и стабилизирует сахар в крови",
+                        "Улучшает моторику кишечника и даёт длительное насыщение"
+                    ),
+                    generalInfo = "Содержит ${product.carbs}г углеводов и ${product.protein}г белка на 100 г.",
+                    recommendedIntake = "40-60 г сухих хлопьев или 200г каши",
+                    glycemicImpact = "Низкий",
+                    cautions = "При целиакии выбирать марки без глютена"
+                )
+
+            // 10. Pasta / Macaroni / Макароны / Спагетти
+            lower.contains("макарон") || lower.contains("спагетти") || lower.contains("паст") || lower.contains("pasta") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Макаронные изделия из твёрдых сортов пшеницы — качественный источник сложных углеводов с высоким содержанием растительного белка.",
+                    healthBenefits = listOf(
+                        "Твёрдые сорта пшеницы имеют плотную структуру и не вызывают резких скачков сахара",
+                        "Обеспечивают стабильное поступление энергии для физических нагрузок"
+                    ),
+                    generalInfo = "Содержит порядка ${product.carbs}г сложных углеводов на 100г.",
+                    recommendedIntake = "150-200 г в готовом виде",
+                    glycemicImpact = "Низкий / Средний",
+                    cautions = "Содержит глютен"
+                )
+
+            // 11. Potato / Картофель
+            lower.contains("картоф") || lower.contains("картош") || lower.contains("potato") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Отварной картофель — источник калия, крахмала и витамина C с высокой степенью насыщения.",
+                    healthBenefits = listOf(
+                        "Богат калием, регулирующим водно-солевой баланс и давление",
+                        "Обогащён устойчивым крахмалом (особенно в охлаждённом виде)"
+                    ),
+                    generalInfo = "Содержит ${product.calories.roundToInt()} ккал и ${product.carbs}г углеводов на 100 г.",
+                    recommendedIntake = "150-200 г",
+                    glycemicImpact = "Средний / Высокий",
+                    cautions = "Предпочтителен отварной или запечённый вид без жирных соусов"
+                )
+
+            // 12. Egg / Яйцо / Белок
+            lower.contains("яйц") || lower.contains("омлет") || lower.contains("egg") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Куриное яйцо — эталонный продукт по аминокислотному составу и усвояемости белка.",
+                    healthBenefits = listOf(
+                        "Идеальный аминокислотный профиль для мышечного синтеза",
+                        "Желток содержит холин для мозга, лецитин и лютеин"
+                    ),
+                    generalInfo = "Одно среднее яйцо даёт 6-7г идеального белка и полезные жиры.",
+                    recommendedIntake = "2-3 шт в день",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Индивидуальная непереносимость"
+                )
+
+            // 13. Cottage cheese / Творог
+            lower.contains("творог") || lower.contains("cottage") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Творог — традиционный кисломолочный продукт с высоким содержанием казеинового белка длительного усвоения.",
+                    healthBenefits = listOf(
+                        "Казеин медленно расщепляется, обеспечивая мышцы аминокислотами на протяжении 6-8 часов",
+                        "Богат кальцием и фосфором для укрепления костной ткани"
+                    ),
+                    generalInfo = "Содержит от ${product.protein}г белка на 100 г порции.",
+                    recommendedIntake = "150-200 г",
+                    glycemicImpact = "Низкий",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 14. Milk / Kefir / Yogurt / Молоко / Кефир / Йогурт / Ряженка / Сметана
+            lower.contains("молок") || lower.contains("кефир") || lower.contains("йогурт") || lower.contains("ряженк") || lower.contains("сметан") || lower.contains("milk") || lower.contains("yogurt") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Молочные и ферментированные продукты — важный источник пробиотиков, кальция и сывороточного белка.",
+                    healthBenefits = listOf(
+                        "Пробиотики в кефире и йогурте поддерживают здоровый микробиом кишечника",
+                        "Кальций и витамин B2 укрепляют опорно-двигательный аппарат"
+                    ),
+                    generalInfo = "Содержит ${product.protein}г белка и ${product.calories.roundToInt()} ккал на 100 г.",
+                    recommendedIntake = "200-250 мл в день",
+                    glycemicImpact = "Низкий",
+                    cautions = "При лактазной недостаточности выбирать безлактозные версии"
+                )
+
+            // 15. Cheese / Сыр
+            Regex("""\bсыр\b|\bсыра\b|\bсыром\b|\bсыры\b|\bcheese\b""", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Твёрдые и полутвёрдые сыры — концентрированный источник молочного белка и кальция.",
+                    healthBenefits = listOf(
+                        "Высокая плотность белка и фосфора на минимальный объем",
+                        "Практически полностью отсутствует лактоза"
+                    ),
+                    generalInfo = "Содержит около ${product.protein}г белка и ${product.fat}г жиров на 100 г.",
+                    recommendedIntake = "30-50 г в день",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Калорийный продукт, контролировать жиры"
+                )
+
+            // 16. Avocado / Авокадо
+            lower.contains("авокадо") || lower.contains("avocado") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Авокадо — фрукт с высокой концентрацией мононенасыщенных жиров (олеиновой кислоты) и клетчатки.",
+                    healthBenefits = listOf(
+                        "Снижает 'плохой' холестерин и укрепляет сосудистую стенку",
+                        "Содержит калий, витамин E и фагоцитарные антиоксиданты"
+                    ),
+                    generalInfo = "Содержит ${product.fat}г полезных жиров и ${product.calories.roundToInt()} ккал на 100 г.",
+                    recommendedIntake = "1/2 шт (70-100 г) в день",
+                    glycemicImpact = "Низкий",
+                    cautions = "Высокая калорийность"
+                )
+
+            // 17. Tomato / Cucumber / Broccoli / Помидоры / Огурцы / Брокколи / Овощи
+            lower.contains("помидор") || lower.contains("томат") || lower.contains("огур") || lower.contains("броккол") || lower.contains("шпинат") || lower.contains("перец") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Свежие овощи и зелень — основа рациона с минимальной калорийностью и максимумом клетчатки и ликопина.",
+                    healthBenefits = listOf(
+                        "Низкая энергетическая плотность с объёмным чувством насыщения",
+                        "Богаты витамином C, ликопином и пищевыми волокнами"
+                    ),
+                    generalInfo = "Всего ${product.calories.roundToInt()} ккал на 100 г с обилием минералов.",
+                    recommendedIntake = "200-300 г в день",
+                    glycemicImpact = "Очень низкий",
+                    cautions = "Без выраженных противопоказаний"
+                )
+
+            // 18. Watermelon / Melon / Арбуз / Дыня
+            lower.contains("арбуз") || lower.contains("дыня") || lower.contains("watermelon") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Арбуз — освежающая бахчевая культура, содержащая аминокислоту цитруллин и антиоксидант ликопин.",
+                    healthBenefits = listOf(
+                        "Цитруллин улучшает кровоток и расширяет сосуды",
+                        "Отлично гидратирует организм за счет высокого содержания влаги"
+                    ),
+                    generalInfo = "Всего ${product.calories.roundToInt()} ккал на 100 г при отменном вкусе.",
+                    recommendedIntake = "200-300 г в порции",
+                    glycemicImpact = "Низкая гликемическая нагрузка при нормальной порции",
+                    cautions = "Учитывать объём сахаров при диабете"
+                )
+
+            // 19. Banana / Apple / Orange / Berries / Банан / Яблоко / Апельсин / Клубника / Ягоды
+            lower.contains("банан") || lower.contains("яблок") || lower.contains("апельсин") || lower.contains("клубник") || lower.contains("черник") || lower.contains("голубик") || lower.contains("ягод") || lower.contains("banana") || lower.contains("apple") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Свежие фрукты и ягоды — естественный источник фруктозы, пектина и природных антиоксидантов.",
+                    healthBenefits = listOf(
+                        "Пектин улучшает выведение токсинов и работу кишечника",
+                        "Защищают клетки от окислительного стресса"
+                    ),
+                    generalInfo = "Содержит ${product.carbs}г природных сахаров на 100 г.",
+                    recommendedIntake = "100-200 г в день",
+                    glycemicImpact = "Низкий / Средний",
+                    cautions = "Употреблять в умеренном количестве"
+                )
+
+            // 20. Oil / Butter / Масло
+            lower.contains("масло") || lower.contains("oil") || lower.contains("butter") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Пищевые растительные и сливочные масла — концентрированный источник жирных кислот и жирорастворимых витаминов A, E, D.",
+                    healthBenefits = listOf(
+                        "Способствуют усвоению жирорастворимых витаминов из овощей",
+                        "Обеспечивают синтез гормонов и мембран клеток"
+                    ),
+                    generalInfo = "Калорийный продукт: около ${product.calories.roundToInt()} ккал на 100 г.",
+                    recommendedIntake = "10-20 г в день",
+                    glycemicImpact = "Низкий (0)",
+                    cautions = "Строго дозировать порции"
+                )
+
+            // 21. Nuts / Almonds / Peanuts / Орехи / Миндаль / Арахис
+            lower.contains("орех") || lower.contains("миндаль") || lower.contains("арахис") || lower.contains("nut") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Орехи и пасты из них — питательный продукт с высоким содержанием растительного белка, полезных жиров и магния.",
+                    healthBenefits = listOf(
+                        "Магний и ненасыщенные жирные кислоты укрепляют ЦНС и сердце",
+                        "Быстро утоляют голод даже небольшой порцией"
+                    ),
+                    generalInfo = "Питательный продукт: ${product.protein}г белка и ${product.fat}г жиров на 100г.",
+                    recommendedIntake = "20-30 г в день",
+                    glycemicImpact = "Низкий",
+                    cautions = "Сильный аллерген"
+                )
+
+            // 22. Bread / Lavash / Crispbread / Хлеб / Лаваш / Хлебцы
+            lower.contains("хлеб") || lower.contains("лаваш") || lower.contains("хлебц") || lower.contains("bread") ->
+                ProductScienceInfo(
+                    productName = product.name,
+                    summary = "Хлебобулочные изделия — традиционный источник сложного крахмала и пищевых волокон для ежедневного рациона.",
+                    healthBenefits = listOf(
+                        "Пищевые волокна цельного зерна стимулируют нормальное пищеварение",
+                        "Быстро восстанавливают физическую энергию"
+                    ),
+                    generalInfo = "Содержит около ${product.carbs}г углеводов на 100г.",
+                    recommendedIntake = "50-100 г в день",
+                    glycemicImpact = "Средний",
+                    cautions = "Содержит глютен"
+                )
+
+            else -> null
+        }
+    }
+
+    suspend fun getNutritionalScienceAdvice(product: Product): Result<ProductScienceInfo> = withContext(Dispatchers.IO) {
+        val curatedLocalInfo = getCuratedLocalScienceInfo(product)
+        if (curatedLocalInfo != null) {
+            return@withContext Result.success(curatedLocalInfo)
+        }
+
         try {
             val apiKey = getApiKey()
             if (apiKey.isBlank()) {
-                return@withContext Result.success(getCuratedLocalScienceAdvice(product))
+                return@withContext Result.failure(AiException(AiError.NotConfigured))
             }
 
             val prompt = """
-                Ты клинический диетолог и учёный в области доказательной медицины (Evidence-Based Nutrition).
-                Дай объективный научный анализ продукта "${product.name}" (категория: ${product.category}, калорийность: ${product.calories} ккал/100г, БЖУ: ${product.protein}/${product.fat}/${product.carbs}).
-                Опирайся на данные современных мета-анализов (PubMed, WHO, EFSA).
-                Насколько этот продукт полезен или вреден? Опиши ключевые микронутриенты, влияние на организм, метаболизм, гликемический индекс, научные факты доказательной медицины и суточную норму.
-                Верни СТРОГО чистый JSON:
+                Дай объективное справочное описание продукта "${product.name}" (категория: ${product.category}, калорийность: ${product.calories} ккал/100г, БЖУ: ${product.protein}/${product.fat}/${product.carbs}).
+                ВАЖНОЕ ПРАВИЛО: НЕ выдумывай названия исследований, журналы или медицинские организации (ВОЗ, PubMed, EFSA). Давай только фактическую информацию о питательной ценности и свойствах продукта.
+                Верни ответ ИСКЛЮЧИТЕЛЬНО в формате чистого JSON:
                 {
                     "productName": "${product.name}",
-                    "summary": "Краткое медицинское резюме о продукте (2-3 предложения)",
+                    "summary": "Краткая справочная информация о продукте (2-3 предложения)",
                     "healthBenefits": [
-                        "Пункт пользы 1 с механизмом действия",
-                        "Пункт пользы 2",
-                        "Пункт пользы 3"
+                        "Питательное свойство 1",
+                        "Питательное свойство 2"
                     ],
-                    "scientificEvidence": "Данные клинических исследований (например: исследования связывают регулярное употребление с...)",
-                    "recommendedIntake": "Рекомендуемая суточная порция (например: 150-200 г в день)",
-                    "glycemicImpact": "Низкий/Средний/Высокий ГИ и влияние на уровень сахара в крови",
-                    "cautions": "Противопоказания, аллергены или на что обратить внимание (или 'Без выраженных противопоказаний')"
+                    "generalInfo": "Общие сведения о пищевой ценности",
+                    "recommendedIntake": "Ориентировочная порция в рационе",
+                    "glycemicImpact": "Низкий/Средний/Высокий",
+                    "cautions": "Особенности употребления или 'Без выраженных противопоказаний'"
                 }
             """.trimIndent()
 
@@ -255,15 +720,22 @@ class GeminiFoodService {
                 put("contents", contents)
             }
 
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
-            val body = requestJson.toString().toRequestBody(jsonMediaType)
-            val request = Request.Builder().url(url).post(body).build()
+            val (responseCode, responseString) = try {
+                executeGeminiRequest(apiKey, requestJson, isPhoto = false)
+            } catch (e: Exception) {
+                if (BuildConfig.DEBUG) {
+                    android.util.Log.e("GEMINI_ERROR", "Product info network failure", e)
+                }
+                return@withContext Result.failure(mapExceptionToAiException(e))
+            }
 
-            val response = client.newCall(request).execute()
-            val responseString = response.body?.string() ?: ""
-
-            if (!response.isSuccessful) {
-                return@withContext Result.success(getCuratedLocalScienceAdvice(product))
+            if (responseCode != 200) {
+                val err = when (responseCode) {
+                    429 -> AiError.QuotaExceeded
+                    401, 403 -> AiError.NotConfigured
+                    else -> AiError.BadResponse
+                }
+                return@withContext Result.failure(AiException(err))
             }
 
             val rawText = extractTextFromGeminiResponse(responseString)
@@ -278,27 +750,237 @@ class GeminiFoodService {
                 }
             }
 
-            val advice = ScienceNutritionAdvice(
+            val info = ProductScienceInfo(
                 productName = json.optString("productName", product.name),
-                summary = json.optString("summary", "Высокопитательный продукт с оптимальным балансом нутриентов."),
-                healthBenefits = if (benefitsList.isNotEmpty()) benefitsList else listOf("Качественный источник энергии", "Поддерживает мышечный тонус"),
-                scientificEvidence = json.optString("scientificEvidence", "Клинические исследования подтверждают высокую усвояемость и пользу для метаболизма."),
-                recommendedIntake = json.optString("recommendedIntake", "100-200 г в сутки в составе сбалансированного рациона."),
-                glycemicImpact = json.optString("glycemicImpact", "Умеренный гликемический ответ."),
-                cautions = json.optString("cautions", "Индивидуальная непереносимость.")
+                summary = json.optString("summary", "").ifBlank { "Пищевой продукт с содержанием ${product.calories.roundToInt()} ккал/100г." },
+                healthBenefits = if (benefitsList.isNotEmpty()) benefitsList else listOf("Источник питательных веществ"),
+                generalInfo = json.optString("generalInfo", "Содержит белки, жиры и углеводы в составе порции."),
+                recommendedIntake = json.optString("recommendedIntake", "100-200 г в день."),
+                glycemicImpact = json.optString("glycemicImpact", "Умеренный"),
+                cautions = json.optString("cautions", "Без выраженных противопоказаний")
             )
-            Result.success(advice)
+            Result.success(info)
         } catch (e: Exception) {
-            e.printStackTrace()
-            Result.success(getCuratedLocalScienceAdvice(product))
+            Result.failure(mapExceptionToAiException(e))
         }
     }
 
-    private fun getApiKey(): String {
-        return try {
-            BuildConfig.GEMINI_API_KEY
-        } catch (e: Exception) {
-            ""
+    fun fallbackQuickTextAnalysis(input: String): RecognizedMeal {
+        val lower = input.lowercase().trim()
+
+        val mealType = when {
+            lower.contains("завтрак") || lower.contains("breakfast") -> MealType.BREAKFAST
+            lower.contains("обед") || lower.contains("lunch") -> MealType.LUNCH
+            lower.contains("ужин") || lower.contains("dinner") -> MealType.DINNER
+            lower.contains("перекус") || lower.contains("полдник") || lower.contains("snack") -> MealType.SNACK
+            else -> MealType.LUNCH
+        }
+
+        val clauseRegex = Regex("""\s+(?:и|and|with)\s+|\s*[,+;]\s*""", RegexOption.IGNORE_CASE)
+        val clauses = lower.split(clauseRegex)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it != "завтрак" && it != "обед" && it != "ужин" && it != "перекус" }
+
+        val items = mutableListOf<RecognizedMealItem>()
+        val unrecognized = mutableListOf<String>()
+
+        for (clause in clauses) {
+            val gramsMatch = Regex("""(\d+)\s*(?:г|гр|мл|g|gr|gram|grams|ml)(?=\s+|$|[^a-zа-я0-9])""", RegexOption.IGNORE_CASE).find(clause)
+            val explicitGrams = gramsMatch?.groupValues?.get(1)?.toIntOrNull()
+
+            var matched = false
+
+            // 1. Tea without sugar / Чай без сахара
+            if (clause.contains("чай")) {
+                matched = true
+                val g = explicitGrams ?: 200
+                val isSugarFree = clause.contains("без сахара") || clause.contains("без сах") || clause.contains("без сахар")
+                if (isSugarFree) {
+                    items.add(RecognizedMealItem("Чай без сахара", g, 2, 0.0, 0.0, 0.2))
+                } else {
+                    items.add(RecognizedMealItem("Чай с сахаром", g, 40, 0.0, 0.0, 10.0))
+                }
+            }
+            // 2. Cutlet / Котлета
+            else if (clause.contains("котлет") || clause.contains("cutlet")) {
+                matched = true
+                val g = explicitGrams ?: 120
+                val factor = g / 100.0
+                val isChicken = clause.contains("курин") || clause.contains("куриц") || clause.contains("chicken")
+                val title = if (isChicken) "Куриная котлета" else "Котлета мясная"
+                val cal = if (isChicken) 162.0 * factor else 240.0 * factor
+                items.add(RecognizedMealItem(title, g, cal.roundToInt(), if (isChicken) 18.0 * factor else 15.0 * factor, if (isChicken) 8.5 * factor else 16.0 * factor, 3.0 * factor))
+            }
+            // 3. Shawarma / Burger / Pizza / Fastfood
+            else if (clause.contains("шаурм") || clause.contains("шаверм") || clause.contains("бургер") || clause.contains("пицц") || clause.contains("shawarma") || clause.contains("burger") || clause.contains("pizza")) {
+                matched = true
+                val g = explicitGrams ?: 250
+                val factor = g / 100.0
+                val title = if (clause.contains("бургер")) "Бургер" else if (clause.contains("пицц")) "Пицца" else "Шаурма с курицей"
+                items.add(RecognizedMealItem(title, g, (232.0 * factor).roundToInt(), 11.0 * factor, 10.5 * factor, 23.5 * factor))
+            }
+            // 4. Turkey breast / Грудка индейки / Филе индейки
+            else if (clause.contains("индейк")) {
+                matched = true
+                val g = explicitGrams ?: 180
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Филе индейки", g, (120.0 * factor).roundToInt(), 25.0 * factor, 2.0 * factor, 0.0))
+            }
+            // 5. Pollack fillet / Филе минтая
+            else if (clause.contains("минта")) {
+                matched = true
+                val g = explicitGrams ?: 150
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Филе минтая", g, (72.0 * factor).roundToInt(), 16.0 * factor, 0.8 * factor, 0.0))
+            }
+            // 6. Raw egg / Сырое яйцо vs Egg / Яйцо
+            else if (clause.contains("яйц") || clause.contains("омлет") || clause.contains("egg")) {
+                matched = true
+                val countMatch = Regex("""(\d+)\s*(?:шт|штуки|штук|pc|pcs)?\s*(?:яй|egg)""", RegexOption.IGNORE_CASE).find(clause)
+                val count = countMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
+                val g = explicitGrams ?: (count * 55)
+                val isRaw = clause.contains("сыро") || clause.contains("сырых")
+                val title = if (isRaw) "Яйцо сырое ($count шт)" else "Яйцо куриное ($count шт)"
+                items.add(RecognizedMealItem(title, g, count * 78, count * 6.5, count * 5.5, count * 0.4))
+            }
+            // 7. Cheese / Сыр (word boundary so it doesn't match сырое)
+            else if (Regex("""\bсыр\b|\bсыра\b|\bсыром\b|\bсыры\b|\bcheese\b""", RegexOption.IGNORE_CASE).containsMatchIn(clause)) {
+                matched = true
+                val g = explicitGrams ?: 40
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Сыр твёрдый", g, (350.0 * factor).roundToInt(), 24.0 * factor, 28.0 * factor, 0.5 * factor))
+            }
+            // 8. Cottage cheese / Творог
+            else if (clause.contains("творог") || clause.contains("cottage")) {
+                matched = true
+                val g = explicitGrams ?: 150
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Творог 5%", g, (121.0 * factor).roundToInt(), 17.2 * factor, 5.0 * factor, 1.8 * factor))
+            }
+            // 9. Banana / Банан
+            else if (clause.contains("банан") || clause.contains("banana")) {
+                matched = true
+                val g = explicitGrams ?: 120
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Банан свежий", g, (89.0 * factor).roundToInt(), 1.1 * factor, 0.3 * factor, 22.8 * factor))
+            }
+            // 10. Watermelon / Арбуз
+            else if (clause.contains("арбуз") || clause.contains("watermelon")) {
+                matched = true
+                val g = explicitGrams ?: 300
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Арбуз свежий", g, (30.0 * factor).roundToInt(), 0.6 * factor, 0.2 * factor, 7.6 * factor))
+            }
+            // 11. Melon / Дыня
+            else if (clause.contains("дыня") || clause.contains("дын") || clause.contains("melon")) {
+                matched = true
+                val g = explicitGrams ?: 250
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Дыня свежая", g, (34.0 * factor).roundToInt(), 0.8 * factor, 0.2 * factor, 8.2 * factor))
+            }
+            // 12. Oats / Овсянка
+            else if (clause.contains("овсянк") || clause.contains("геркулес") || clause.contains("oat")) {
+                matched = true
+                val g = explicitGrams ?: 200
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Овсяная каша", g, (102.0 * factor).roundToInt(), 3.5 * factor, 2.0 * factor, 17.5 * factor))
+            }
+            // 13. Apple / Яблоко
+            else if (clause.contains("яблок") || clause.contains("apple")) {
+                matched = true
+                val g = explicitGrams ?: 150
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Яблоко свежее", g, (52.0 * factor).roundToInt(), 0.3 * factor, 0.2 * factor, 13.8 * factor))
+            }
+            // 14. Chicken / Курица (if not cutlet)
+            else if (clause.contains("куриц") || clause.contains("курин") || clause.contains("chicken")) {
+                matched = true
+                val g = explicitGrams ?: 180
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Куриное филе отварное", g, (165.0 * factor).roundToInt(), 31.0 * factor, 3.6 * factor, 0.0))
+            }
+            // 15. Potato / Картофель (NOT just "пюре")
+            else if (clause.contains("картоф") || clause.contains("картош") || clause.contains("картофельное пюре")) {
+                matched = true
+                val g = explicitGrams ?: 180
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Картофель отварной", g, (86.0 * factor).roundToInt(), 2.0 * factor, 0.4 * factor, 18.0 * factor))
+            }
+            // 16. Buckwheat / Гречка
+            else if (clause.contains("гречк") || clause.contains("buckwheat")) {
+                matched = true
+                val g = explicitGrams ?: 180
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Гречневая каша", g, (110.0 * factor).roundToInt(), 4.2 * factor, 1.3 * factor, 21.3 * factor))
+            }
+            // 17. Rice / Рис
+            else if (clause.contains("рис") || clause.contains("rice")) {
+                matched = true
+                val g = explicitGrams ?: 180
+                val factor = g / 100.0
+                items.add(RecognizedMealItem("Рис отварной", g, (130.0 * factor).roundToInt(), 2.7 * factor, 0.3 * factor, 28.2 * factor))
+            }
+            // 18. Coffee / Кофе
+            else if (clause.contains("кофе") || clause.contains("coffee")) {
+                matched = true
+                val g = explicitGrams ?: 200
+                items.add(RecognizedMealItem("Кофе с молоком", g, 35, 1.5, 1.2, 4.0))
+            }
+
+            if (!matched) {
+                unrecognized.add(clause)
+            }
+        }
+
+        val totalGrams = items.sumOf { it.grams }
+        val totalCal = items.sumOf { it.calories }
+        val totalP = items.sumOf { it.protein }
+        val totalF = items.sumOf { it.fat }
+        val totalC = items.sumOf { it.carbs }
+
+        val summary = if (items.isNotEmpty()) {
+            items.joinToString(" и ") { it.name }
+        } else if (unrecognized.isNotEmpty()) {
+            "Не распознано: ${unrecognized.joinToString(", ")}"
+        } else {
+            input
+        }
+
+        return RecognizedMeal(
+            dishName = summary,
+            estimatedGrams = totalGrams,
+            calories = totalCal,
+            protein = totalP,
+            fat = totalF,
+            carbs = totalC,
+            mealType = mealType,
+            confidence = "Офлайн-оценка",
+            description = if (unrecognized.isNotEmpty()) "Не распознано: ${unrecognized.joinToString(", ")}" else "Офлайн-анализ",
+            items = items,
+            isEstimate = true,
+            unrecognizedItems = unrecognized
+        )
+    }
+
+    private fun mapExceptionToAiException(e: Exception): AiException {
+        if (e is AiException) return e
+        return when (e) {
+            is SocketTimeoutException, is InterruptedIOException, is TimeoutException -> {
+                AiException(AiError.Unknown("Сервер Gemini не ответил вовремя. Если вы в РФ, включите VPN на устройстве."))
+            }
+            is UnknownHostException, is ConnectException, is NoRouteToHostException -> {
+                AiException(AiError.Unknown("Не удалось подключиться к Gemini. Проверьте сеть или включите VPN."))
+            }
+            else -> {
+                val msg = e.message ?: ""
+                if (msg.contains("timeout", ignoreCase = true)) {
+                    AiException(AiError.Unknown("Сервер Gemini не ответил вовремя. Если вы в РФ, включите VPN."))
+                } else if (msg.contains("host", ignoreCase = true) || msg.contains("network", ignoreCase = true) || msg.contains("connect", ignoreCase = true)) {
+                    AiException(AiError.Unknown("Сбой сети. Проверьте интернет или включите VPN."))
+                } else {
+                    AiException(AiError.Unknown(msg.ifBlank { "Ошибка соединения с ИИ." }))
+                }
+            }
         }
     }
 
@@ -343,8 +1025,73 @@ class GeminiFoodService {
     }
 
     private fun parseRecognizedMealJson(jsonStr: String): RecognizedMeal {
-        val json = JSONObject(jsonStr)
-        val mealTypeStr = json.optString("mealType", "LUNCH").uppercase()
+        val json = try {
+            JSONObject(jsonStr)
+        } catch (e: Exception) {
+            throw AiException(AiError.BadResponse)
+        }
+
+        fun optDoubleSafe(obj: JSONObject, vararg keys: String): Double? {
+            for (k in keys) {
+                if (obj.has(k) && !obj.isNull(k)) {
+                    val d = obj.optDouble(k, Double.NaN)
+                    if (d.isFinite() && d >= 0.0) return d
+                }
+            }
+            return null
+        }
+
+        fun optStringSafe(obj: JSONObject, vararg keys: String): String? {
+            for (k in keys) {
+                if (obj.has(k) && !obj.isNull(k)) {
+                    val s = obj.optString(k, "").trim()
+                    if (s.isNotBlank()) return s
+                }
+            }
+            return null
+        }
+
+        val itemsList = mutableListOf<RecognizedMealItem>()
+        val itemsJson = json.optJSONArray("items") ?: json.optJSONArray("products")
+
+        if (itemsJson != null && itemsJson.length() > 0) {
+            for (i in 0 until itemsJson.length()) {
+                val itemObj = itemsJson.optJSONObject(i) ?: continue
+                val name = optStringSafe(itemObj, "name", "productName", "product_name", "dishName")
+                    ?: throw AiException(AiError.BadResponse)
+
+                val gramsDouble = optDoubleSafe(itemObj, "grams", "weight", "estimatedGrams", "weightGrams")
+                    ?: throw AiException(AiError.BadResponse)
+                val calDouble = optDoubleSafe(itemObj, "calories", "kcal", "energy")
+                    ?: throw AiException(AiError.BadResponse)
+                val p = optDoubleSafe(itemObj, "protein", "proteins") ?: 0.0
+                val f = optDoubleSafe(itemObj, "fat", "fats") ?: 0.0
+                val c = optDoubleSafe(itemObj, "carbs", "carbohydrates") ?: 0.0
+
+                val grams = gramsDouble.roundToInt()
+                val cal = calDouble.roundToInt()
+
+                if (grams !in 1..5000 || cal !in 0..5000 || p !in 0.0..500.0 || f !in 0.0..500.0 || c !in 0.0..1000.0) {
+                    throw AiException(AiError.BadResponse)
+                }
+
+                itemsList.add(
+                    RecognizedMealItem(
+                        name = name,
+                        grams = grams,
+                        calories = cal,
+                        protein = p,
+                        fat = f,
+                        carbs = c
+                    )
+                )
+            }
+        }
+
+        val dishName = optStringSafe(json, "dishName", "dish_name", "title", "name")
+            ?: if (itemsList.isNotEmpty()) itemsList.joinToString(", ") { it.name } else throw AiException(AiError.BadResponse)
+
+        val mealTypeStr = (optStringSafe(json, "mealType", "meal_type") ?: "").uppercase()
         val mealType = when {
             mealTypeStr.contains("BREAKFAST") || mealTypeStr.contains("ЗАВТРАК") -> MealType.BREAKFAST
             mealTypeStr.contains("LUNCH") || mealTypeStr.contains("ОБЕД") -> MealType.LUNCH
@@ -352,443 +1099,52 @@ class GeminiFoodService {
             else -> MealType.SNACK
         }
 
-        val itemsList = mutableListOf<RecognizedMealItem>()
-        val itemsJson = json.optJSONArray("items")
-        if (itemsJson != null) {
-            for (i in 0 until itemsJson.length()) {
-                val itemObj = itemsJson.optJSONObject(i) ?: continue
-                itemsList.add(
-                    RecognizedMealItem(
-                        name = itemObj.optString("name", "Продукт"),
-                        grams = itemObj.optInt("grams", 100),
-                        calories = itemObj.optInt("calories", 100),
-                        protein = itemObj.optDouble("protein", 5.0),
-                        fat = itemObj.optDouble("fat", 3.0),
-                        carbs = itemObj.optDouble("carbs", 15.0)
-                    )
-                )
-            }
-        }
-
-        val calculatedGrams = if (itemsList.isNotEmpty()) itemsList.sumOf { it.grams } else json.optInt("estimatedGrams", 200)
-        val calculatedCal = if (itemsList.isNotEmpty()) itemsList.sumOf { it.calories } else json.optInt("calories", 300)
-        val calculatedP = if (itemsList.isNotEmpty()) itemsList.sumOf { it.protein } else json.optDouble("protein", 15.0)
-        val calculatedF = if (itemsList.isNotEmpty()) itemsList.sumOf { it.fat } else json.optDouble("fat", 10.0)
-        val calculatedC = if (itemsList.isNotEmpty()) itemsList.sumOf { it.carbs } else json.optDouble("carbs", 35.0)
-
-        val dishTitle = if (itemsList.size > 1) {
-            itemsList.joinToString(", ") { "${it.name} (${it.grams}г)" }
+        val grams = if (itemsList.isNotEmpty()) {
+            itemsList.sumOf { it.grams }
         } else {
-            json.optString("dishName", "Блюдо")
+            (optDoubleSafe(json, "estimatedGrams", "grams", "weight") ?: throw AiException(AiError.BadResponse)).roundToInt()
+        }
+
+        val calories = if (itemsList.isNotEmpty()) {
+            itemsList.sumOf { it.calories }
+        } else {
+            (optDoubleSafe(json, "calories", "kcal") ?: throw AiException(AiError.BadResponse)).roundToInt()
+        }
+
+        val protein = if (itemsList.isNotEmpty()) {
+            itemsList.sumOf { it.protein }
+        } else {
+            optDoubleSafe(json, "protein", "proteins") ?: 0.0
+        }
+
+        val fat = if (itemsList.isNotEmpty()) {
+            itemsList.sumOf { it.fat }
+        } else {
+            optDoubleSafe(json, "fat", "fats") ?: 0.0
+        }
+
+        val carbs = if (itemsList.isNotEmpty()) {
+            itemsList.sumOf { it.carbs }
+        } else {
+            optDoubleSafe(json, "carbs", "carbohydrates") ?: 0.0
+        }
+
+        if (grams !in 1..5000 || calories !in 0..5000 || protein !in 0.0..500.0 || fat !in 0.0..500.0 || carbs !in 0.0..1000.0) {
+            throw AiException(AiError.BadResponse)
         }
 
         return RecognizedMeal(
-            dishName = dishTitle,
-            estimatedGrams = calculatedGrams,
-            calories = calculatedCal,
-            protein = calculatedP,
-            fat = calculatedF,
-            carbs = calculatedC,
+            dishName = dishName,
+            estimatedGrams = grams,
+            calories = calories,
+            protein = protein,
+            fat = fat,
+            carbs = carbs,
             mealType = mealType,
-            confidence = json.optString("confidence", "Высокая"),
-            description = json.optString("description", ""),
-            items = itemsList
-        )
-    }
-
-    private fun fallbackPhotoAnalysis(bitmap: Bitmap? = null): RecognizedMeal {
-        if (bitmap != null) {
-            try {
-                // Sample 30x30 pixel grid from bitmap to analyze visual characteristics
-                val sample = Bitmap.createScaledBitmap(bitmap, 30, 30, false)
-                var totalRed = 0L
-                var totalGreen = 0L
-                var totalBlue = 0L
-                val totalPixels = 30 * 30
-
-                for (x in 0 until 30) {
-                    for (y in 0 until 30) {
-                        val pixel = sample.getPixel(x, y)
-                        totalRed += (pixel shr 16) and 0xFF
-                        totalGreen += (pixel shr 8) and 0xFF
-                        totalBlue += pixel and 0xFF
-                    }
-                }
-
-                val avgR = (totalRed / totalPixels).toInt()
-                val avgG = (totalGreen / totalPixels).toInt()
-                val avgB = (totalBlue / totalPixels).toInt()
-
-                return when {
-                    // Dominant Green (Salads / Fresh Greens)
-                    avgG > avgR * 1.15 && avgG > avgB * 1.1 -> RecognizedMeal(
-                        dishName = "Свежий зеленый салат с авокадо и овощами",
-                        estimatedGrams = 220,
-                        calories = 175,
-                        protein = 4.2,
-                        fat = 12.0,
-                        carbs = 14.5,
-                        mealType = MealType.LUNCH,
-                        confidence = "ИИ Оценка (Цветовая спектроскопия)",
-                        description = "Листья салата, авокадо, огурцы и оливковая заправка"
-                    )
-
-                    // Dominant Red / Orange (Tomato Pasta, Pizza, Borsch)
-                    avgR > avgG * 1.25 && avgR > avgB * 1.2 -> RecognizedMeal(
-                        dishName = "Паста с томатным соусом и базиликом",
-                        estimatedGrams = 260,
-                        calories = 340,
-                        protein = 11.5,
-                        fat = 8.5,
-                        carbs = 54.0,
-                        mealType = MealType.LUNCH,
-                        confidence = "ИИ Оценка (Цветовая спектроскопия)",
-                        description = "Итальянская паста в томатном соусе с тертым сыром"
-                    )
-
-                    // Dominant Yellow / Golden (Omelette, Bakery, Cheese, Pancakes)
-                    avgR > 140 && avgG > 130 && avgB < 120 -> RecognizedMeal(
-                        dishName = "Пышный омлет с сыром и томатами",
-                        estimatedGrams = 200,
-                        calories = 285,
-                        protein = 17.5,
-                        fat = 21.0,
-                        carbs = 4.5,
-                        mealType = MealType.BREAKFAST,
-                        confidence = "ИИ Оценка (Цветовая спектроскопия)",
-                        description = "Запеченный омлет из фермерских яиц с сыром"
-                    )
-
-                    // Dominant Dark / Brown (Steak, Coffee, Roast meat)
-                    avgR < 110 && avgG < 90 && avgB < 85 -> RecognizedMeal(
-                        dishName = "Стейк из говядины на гриле",
-                        estimatedGrams = 230,
-                        calories = 430,
-                        protein = 41.0,
-                        fat = 28.0,
-                        carbs = 1.0,
-                        mealType = MealType.DINNER,
-                        confidence = "ИИ Оценка (Цветовая спектроскопия)",
-                        description = "Сочный стейк средней прожарки с пряными специями"
-                    )
-
-                    // Light / Pale (Cottage Cheese, Oatmeal, Milk, Rice)
-                    avgR > 170 && avgG > 170 && avgB > 165 -> RecognizedMeal(
-                        dishName = "Творожная запеканка с ягодами",
-                        estimatedGrams = 190,
-                        calories = 240,
-                        protein = 21.0,
-                        fat = 6.5,
-                        carbs = 23.0,
-                        mealType = MealType.BREAKFAST,
-                        confidence = "ИИ Оценка (Цветовая спектроскопия)",
-                        description = "Нежный творог с натуральными свежими ягодами"
-                    )
-
-                    else -> {
-                        val dynamicPool = listOf(
-                            RecognizedMeal("Стейк из лосося с запеченными овощами", 240, 380, 32.0, 22.0, 8.0, MealType.DINNER, "ИИ Анализ", "Филе лосося с запеченным цукини и перцем"),
-                            RecognizedMeal("Овсяная каша на молоке с фруктами", 220, 260, 8.5, 6.0, 42.0, MealType.BREAKFAST, "ИИ Анализ", "Овсянка с яблоками, корицей и меда"),
-                            RecognizedMeal("Рыбное филе с гарниром из дикого риса", 250, 320, 28.0, 7.0, 36.0, MealType.LUNCH, "ИИ Анализ", "Филе белой рыбы с отварным диким рисом"),
-                            RecognizedMeal("Домашние сырники со сметаной", 180, 310, 19.0, 11.0, 32.0, MealType.BREAKFAST, "ИИ Анализ", "Нежные сырники из запеченного творога")
-                        )
-                        val index = ((totalRed + totalGreen + totalBlue) % dynamicPool.size).toInt()
-                        dynamicPool[index]
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        return RecognizedMeal(
-            dishName = "Запеченный лосось с тушеными овощами",
-            estimatedGrams = 250,
-            calories = 340,
-            protein = 28.0,
-            fat = 16.0,
-            carbs = 18.0,
-            mealType = MealType.LUNCH,
-            confidence = "Оценка",
-            description = "Блюдо из запеченных овощей и белкового гарнира"
-        )
-    }
-
-    private fun fallbackQuickTextAnalysis(input: String): RecognizedMeal {
-        val lower = input.lowercase()
-
-        val mealType = when {
-            lower.contains("завтрак") -> MealType.BREAKFAST
-            lower.contains("обед") -> MealType.LUNCH
-            lower.contains("ужин") -> MealType.DINNER
-            lower.contains("перекус") || lower.contains("полдник") -> MealType.SNACK
-            lower.contains("яйц") || lower.contains("овсянк") || lower.contains("каша") || lower.contains("творог") || lower.contains("сырник") -> MealType.BREAKFAST
-            lower.contains("суп") || lower.contains("борщ") || lower.contains("котлет") || lower.contains("гречк") || lower.contains("рис") || lower.contains("макарон") -> MealType.LUNCH
-            else -> MealType.LUNCH
-        }
-
-        val items = mutableListOf<RecognizedMealItem>()
-        val recognizedFoods = mutableSetOf<String>()
-
-        fun extractFood(text: String) {
-            val gramsMatch = Regex("""(\d+)\s*(?:г|гр|g|gram)""").find(text)
-            val explicitGrams = gramsMatch?.groupValues?.get(1)?.toIntOrNull()
-
-            if (text.contains("яйц") && !recognizedFoods.contains("egg")) {
-                recognizedFoods.add("egg")
-                val countMatch = Regex("""(\d+)\s*(?:шт|штуки|штук)?\s*яй""").find(text)
-                    ?: Regex("""яй[а-я]*\s*(\d+)""").find(text)
-                val count = countMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-                val g = count * 55
-                items.add(
-                    RecognizedMealItem(
-                        name = if (count == 1) "Яйцо куриное (1 шт)" else "Яйца куриные ($count шт)",
-                        grams = g,
-                        calories = count * 78,
-                        protein = count * 6.5,
-                        fat = count * 5.5,
-                        carbs = count * 0.4
-                    )
-                )
-            }
-
-            if (text.contains("творог") && !recognizedFoods.contains("cottage")) {
-                recognizedFoods.add("cottage")
-                val g = explicitGrams ?: 150
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Творог 5%",
-                        grams = g,
-                        calories = (121 * factor).toInt(),
-                        protein = 16.0 * factor,
-                        fat = 5.0 * factor,
-                        carbs = 3.0 * factor
-                    )
-                )
-            }
-
-            if ((text.contains("овсянк") || text.contains("геркулес")) && !recognizedFoods.contains("oats")) {
-                recognizedFoods.add("oats")
-                val g = explicitGrams ?: 200
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Овсяная каша",
-                        grams = g,
-                        calories = (102 * factor).toInt(),
-                        protein = 3.5 * factor,
-                        fat = 2.0 * factor,
-                        carbs = 17.5 * factor
-                    )
-                )
-            }
-
-            if (text.contains("банан") && !recognizedFoods.contains("banana")) {
-                recognizedFoods.add("banana")
-                val countMatch = Regex("""(\d+)\s*(?:шт)?\s*банан""").find(text)
-                val count = countMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-                val g = explicitGrams ?: (count * 120)
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = if (count > 1) "Банан ($count шт)" else "Банан свежий",
-                        grams = g,
-                        calories = (89 * factor).toInt(),
-                        protein = 1.1 * factor,
-                        fat = 0.3 * factor,
-                        carbs = 21.0 * factor
-                    )
-                )
-            }
-
-            if (text.contains("гречк") && !recognizedFoods.contains("buckwheat")) {
-                recognizedFoods.add("buckwheat")
-                val g = explicitGrams ?: 180
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Гречневая каша",
-                        grams = g,
-                        calories = (110 * factor).toInt(),
-                        protein = 4.2 * factor,
-                        fat = 1.1 * factor,
-                        carbs = 21.0 * factor
-                    )
-                )
-            }
-
-            // Milk (e.g. 2 стакана молока)
-            if ((text.contains("молок") || text.contains("молока")) && !text.contains("кофе") && !recognizedFoods.contains("milk")) {
-                recognizedFoods.add("milk")
-                val glassMatch = Regex("""(\d+)\s*(?:стакан|стакана|стаканов)""").find(text)
-                val glasses = glassMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-                val g = explicitGrams ?: (glasses * 200)
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = if (glasses > 1) "Молоко 2.5% ($glasses стакана)" else "Молоко 2.5%",
-                        grams = g,
-                        calories = (60 * factor).toInt(),
-                        protein = 3.0 * factor,
-                        fat = 2.5 * factor,
-                        carbs = 4.8 * factor
-                    )
-                )
-            }
-
-            // Corn sticks (e.g. кукурузные палочки кузя лакомкин)
-            if ((text.contains("кукуруз") || text.contains("палочк") || text.contains("кузя") || text.contains("лакомкин")) && !recognizedFoods.contains("corn_sticks")) {
-                recognizedFoods.add("corn_sticks")
-                val g = explicitGrams ?: 70
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Кукурузные палочки Кузя Лакомкин",
-                        grams = g,
-                        calories = (510 * factor).toInt(),
-                        protein = 4.5 * factor,
-                        fat = 26.0 * factor,
-                        carbs = 64.0 * factor
-                    )
-                )
-            }
-
-            // Chicken (must match chicken/fillet/breast, but NOT corn sticks / кукурузные!)
-            val isChickenTerm = (text.contains("куриц") || text.contains("курин") || text.contains("филе") || text.contains("грудк")) && !text.contains("кукуруз")
-            if (isChickenTerm && !recognizedFoods.contains("chicken")) {
-                recognizedFoods.add("chicken")
-                val g = explicitGrams ?: 180
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Куриное филе отварное",
-                        grams = g,
-                        calories = (165 * factor).toInt(),
-                        protein = 31.0 * factor,
-                        fat = 3.6 * factor,
-                        carbs = 0.0
-                    )
-                )
-            }
-
-            // Rice
-            if (text.contains("рис") && !recognizedFoods.contains("rice")) {
-                recognizedFoods.add("rice")
-                val g = explicitGrams ?: 180
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Рис отварной",
-                        grams = g,
-                        calories = (130 * factor).toInt(),
-                        protein = 2.7 * factor,
-                        fat = 0.3 * factor,
-                        carbs = 28.0 * factor
-                    )
-                )
-            }
-
-            // Coffee
-            if (text.contains("кофе") && !recognizedFoods.contains("coffee")) {
-                recognizedFoods.add("coffee")
-                val hasMilk = text.contains("молок") || text.contains("сливк")
-                items.add(
-                    RecognizedMealItem(
-                        name = if (hasMilk) "Кофе с молоком" else "Черный кофе",
-                        grams = 200,
-                        calories = if (hasMilk) 55 else 4,
-                        protein = if (hasMilk) 2.5 else 0.2,
-                        fat = if (hasMilk) 2.0 else 0.1,
-                        carbs = if (hasMilk) 6.0 else 0.5
-                    )
-                )
-            }
-
-            if ((text.contains("сырник") || text.contains("сырники")) && !recognizedFoods.contains("syrniki")) {
-                recognizedFoods.add("syrniki")
-                val g = explicitGrams ?: 180
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Сырники творожные",
-                        grams = g,
-                        calories = (210 * factor).toInt(),
-                        protein = 16.0 * factor,
-                        fat = 8.0 * factor,
-                        carbs = 18.0 * factor
-                    )
-                )
-            }
-
-            if (text.contains("яблок") && !recognizedFoods.contains("apple")) {
-                recognizedFoods.add("apple")
-                val count = 1
-                val g = explicitGrams ?: (count * 150)
-                val factor = g / 100.0
-                items.add(
-                    RecognizedMealItem(
-                        name = "Яблоко свежее",
-                        grams = g,
-                        calories = (52 * factor).toInt(),
-                        protein = 0.3 * factor,
-                        fat = 0.2 * factor,
-                        carbs = 14.0 * factor
-                    )
-                )
-            }
-        }
-
-        val clauses = lower.split(Regex("""\b(?:и|\+|\,|\;)\b|\band\b"""))
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-
-        for (clause in clauses) {
-            extractFood(clause)
-        }
-
-        if (items.size < 2) {
-            extractFood(lower)
-        }
-
-        if (items.isEmpty()) {
-            val grams = Regex("""(\d+)\s*(?:г|гр|g|gram)""").find(lower)?.groupValues?.get(1)?.toIntOrNull() ?: 200
-            val factor = grams / 100.0
-            val cleanName = input.replace(Regex("""(?i)\b(?:съел|съела|съели|на\s+завтрак|на\s+обед|на\s+ужин|на\s+перекус)\b"""), "").trim()
-                .replaceFirstChar { it.uppercase() }
-                .ifBlank { "Приём пищи" }
-            return RecognizedMeal(
-                dishName = cleanName,
-                estimatedGrams = grams,
-                calories = (160 * factor).toInt(),
-                protein = 7.0 * factor,
-                fat = 5.0 * factor,
-                carbs = 20.0 * factor,
-                mealType = mealType,
-                confidence = "Оценка",
-                description = "Порция $grams г",
-                items = listOf(RecognizedMealItem(cleanName, grams, (160 * factor).toInt(), 7.0 * factor, 5.0 * factor, 20.0 * factor))
-            )
-        }
-
-        val totalGrams = items.sumOf { it.grams }
-        val totalCalories = items.sumOf { it.calories }
-        val totalProtein = items.sumOf { it.protein }
-        val totalFat = items.sumOf { it.fat }
-        val totalCarbs = items.sumOf { it.carbs }
-        val summaryTitle = items.joinToString(", ") { "${it.name} (${it.grams}г)" }
-
-        return RecognizedMeal(
-            dishName = items.joinToString(" и ") { it.name },
-            estimatedGrams = totalGrams,
-            calories = totalCalories,
-            protein = totalProtein,
-            fat = totalFat,
-            carbs = totalCarbs,
-            mealType = mealType,
-            confidence = "Высокая",
-            description = summaryTitle,
-            items = items
+            confidence = optStringSafe(json, "confidence") ?: "Высокая",
+            description = optStringSafe(json, "description") ?: "",
+            items = itemsList,
+            isEstimate = false
         )
     }
 
@@ -796,7 +1152,6 @@ class GeminiFoodService {
         val cleanCode = barcode.trim()
         if (cleanCode.isBlank()) return@withContext null
 
-        // 1. Try OpenFoodFacts REST API
         try {
             val offUrl = "https://world.openfoodfacts.org/api/v2/product/$cleanCode.json"
             val request = Request.Builder().url(offUrl).get().build()
@@ -813,23 +1168,45 @@ class GeminiFoodService {
                     }.trim()
 
                     val nutriments = prodObj.optJSONObject("nutriments")
-                    val kcal = nutriments?.optDouble("energy-kcal_100g")
-                        ?: nutriments?.optDouble("energy-kcal")
-                        ?: 150.0
-                    val protein = nutriments?.optDouble("proteins_100g") ?: 5.0
-                    val fat = nutriments?.optDouble("fat_100g") ?: 3.0
-                    val carbs = nutriments?.optDouble("carbohydrates_100g") ?: 15.0
+
+                    fun parseDoubleSafe(obj: JSONObject?, key: String): Double? {
+                        if (obj == null || !obj.has(key)) return null
+                        val v = obj.optDouble(key, Double.NaN)
+                        return if (v.isNaN() || v < 0) null else v
+                    }
+
+                    val kcal = parseDoubleSafe(nutriments, "energy-kcal_100g")
+                        ?: parseDoubleSafe(nutriments, "energy-kcal_value")
+                        ?: parseDoubleSafe(nutriments, "energy-kcal")
+
+                    val protein = parseDoubleSafe(nutriments, "proteins_100g")
+                    val fat = parseDoubleSafe(nutriments, "fat_100g")
+                    val carbs = parseDoubleSafe(nutriments, "carbohydrates_100g")
 
                     val finalName = if (rawName.isNotBlank() && rawName != "null") rawName else "Продукт ($cleanCode)"
+
+                    if (kcal == null || protein == null || fat == null || carbs == null) {
+                        return@withContext Product(
+                            name = finalName,
+                            category = "Сканированное",
+                            calories = 0.0,
+                            protein = 0.0,
+                            fat = 0.0,
+                            carbs = 0.0,
+                            barcode = cleanCode,
+                            isCustom = true
+                        )
+                    }
 
                     return@withContext Product(
                         name = finalName,
                         category = "Сканированное",
-                        calories = if (kcal.isNaN() || kcal <= 0) 150.0 else kcal,
-                        protein = if (protein.isNaN() || protein < 0) 5.0 else protein,
-                        fat = if (fat.isNaN() || fat < 0) 3.0 else fat,
-                        carbs = if (carbs.isNaN() || carbs < 0) 15.0 else carbs,
-                        barcode = cleanCode
+                        calories = kcal,
+                        protein = protein,
+                        fat = fat,
+                        carbs = carbs,
+                        barcode = cleanCode,
+                        isCustom = true
                     )
                 }
             }
@@ -837,128 +1214,6 @@ class GeminiFoodService {
             e.printStackTrace()
         }
 
-        // 2. Gemini AI fallback barcode lookup
-        try {
-            val apiKey = getApiKey()
-            if (apiKey.isNotBlank()) {
-                val prompt = """
-                    Определи или предложи название и пищевую ценность (на 100г) для штрих-кода EAN/UPC "$cleanCode".
-                    Если штрих-код неизвестен, предложи качественный популярный продукт питания.
-                    Верни СТРОГО чистый JSON:
-                    {
-                        "name": "Название продукта на русском",
-                        "category": "Продукты",
-                        "calories": 140.0,
-                        "protein": 8.0,
-                        "fat": 4.0,
-                        "carbs": 18.0
-                    }
-                """.trimIndent()
-
-                val requestJson = JSONObject().apply {
-                    val contents = JSONArray().apply {
-                        val contentObj = JSONObject().apply {
-                            val parts = JSONArray().apply {
-                                put(JSONObject().apply { put("text", prompt) })
-                            }
-                            put("parts", parts)
-                        }
-                        put(contentObj)
-                    }
-                    put("contents", contents)
-                }
-
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"
-                val body = requestJson.toString().toRequestBody(jsonMediaType)
-                val req = Request.Builder().url(url).post(body).build()
-
-                val resp = client.newCall(req).execute()
-                if (resp.isSuccessful) {
-                    val rawText = extractTextFromGeminiResponse(resp.body?.string() ?: "")
-                    val jsonStr = cleanJsonString(rawText)
-                    val parsed = JSONObject(jsonStr)
-                    return@withContext Product(
-                        name = parsed.optString("name", "Продукт $cleanCode"),
-                        category = parsed.optString("category", "Продукты"),
-                        calories = parsed.optDouble("calories", 150.0),
-                        protein = parsed.optDouble("protein", 5.0),
-                        fat = parsed.optDouble("fat", 3.0),
-                        carbs = parsed.optDouble("carbs", 15.0),
-                        barcode = cleanCode
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // 3. Last fallback default product
-        Product(
-            name = "Продукт ($cleanCode)",
-            category = "Сканированное",
-            calories = 180.0,
-            protein = 8.0,
-            fat = 4.0,
-            carbs = 25.0,
-            barcode = cleanCode
-        )
-    }
-
-    private fun getCuratedLocalScienceAdvice(product: Product): ScienceNutritionAdvice {
-        val lower = product.name.lowercase()
-        return when {
-            lower.contains("яйц") -> ScienceNutritionAdvice(
-                productName = product.name,
-                summary = "Эталонный источник легкоусвояемого белка с высокой биологической ценностью (BV=100) и холина.",
-                healthBenefits = listOf(
-                    "Холин (витамин B4) критически важен для мембран клеток головного мозга и функции печени",
-                    "Лютеин и зеаксантин защищают сетчатку глаз от возрастных изменений",
-                    "Полный аминокислотный профиль для синтеза мышечного белка"
-                ),
-                scientificEvidence = "Мета-анализы в The BMJ и American Journal of Clinical Nutrition показывают, что 1-3 яйца в день не повышают сердечно-сосудистые риски у здоровых людей и улучшают профиль ЛПВП (хорошего холестерина).",
-                recommendedIntake = "1-3 штуки в сутки в зависимости от тренировочных целей.",
-                glycemicImpact = "Нулевой гликемический индекс (ГИ=0). Не провоцирует скачков инсулина.",
-                cautions = "Аллергия на яичный белок (овомукоид). При гиперхолестеринемии консультируйтесь с врачом."
-            )
-            lower.contains("творог") -> ScienceNutritionAdvice(
-                productName = product.name,
-                summary = "Концентрированный источник медленноусвояемого мицеллярного казеина и биодоступного кальция.",
-                healthBenefits = listOf(
-                    "Казеиновый белок обеспечивает пролонгированное поступление аминокислот до 6-8 часов",
-                    "Кальций и фосфор укрепляют костную ткань и зубную эмаль",
-                    "Молочнокислые бактерии поддерживают здоровый микробиом ЖКТ"
-                ),
-                scientificEvidence = "Исследования в Journal of Nutrition подтверждают эффективность творога перед сном для снижения ночного катаболизма и ускорения восстановления спортсменов.",
-                recommendedIntake = "150-200 г в день, идеально для завтрака или вечернего перекуса.",
-                glycemicImpact = "Низкий ГИ (около 30), но умеренный инсулиновый индекс за счёт сывороточных фракций.",
-                cautions = "Лактазная недостаточность (рекомендуется безлактозный вариант)."
-            )
-            lower.contains("гречк") -> ScienceNutritionAdvice(
-                productName = product.name,
-                summary = "Гипоаллергенный сложный углевод, богатый флавоноидом рутином, железом и магнием.",
-                healthBenefits = listOf(
-                    "Рутин (витамин P) укрепляет капилляры и улучшает микроциркуляцию крови",
-                    "Растворимая и нерастворимая клетчатка для здоровой перистальтики кишечника",
-                    "Магний регулирует артериальное давление и мышечные сокращения"
-                ),
-                scientificEvidence = "Клинические исследования ВОЗ и EFSA отмечают гречку как суперфуд с низким риском аллергических реакций и выраженным антиоксидантным эффектом.",
-                recommendedIntake = "60-80 г сухого продукта (150-200 г в готовом виде) в качестве основного гарнира.",
-                glycemicImpact = "Низкий ГИ (45-50), обеспечивает стабильный уровень глюкозы без резких спадов энергии.",
-                cautions = "Без глютена; безопасна для людей с целиакией."
-            )
-            else -> ScienceNutritionAdvice(
-                productName = product.name,
-                summary = "Ценный продукт категории «${product.category}», вносящий вклад в разнообразие микронутриентного профиля рациона.",
-                healthBenefits = listOf(
-                    "Участвует в восполнении суточной потребности в макронутриентах",
-                    "Снабжает организм строительными аминокислотами и энергией",
-                    "Поддерживает метаболическую стабильность при соблюдении нормы калорий"
-                ),
-                scientificEvidence = "Современные рекомендации Гарвардской тарелки здорового питания (Healthy Eating Plate) подчеркивают важность умеренности и разнообразия цельных продуктов.",
-                recommendedIntake = "100-200 г в зависимости от индивидуальных целей КБЖУ.",
-                glycemicImpact = "В пределах нормы для категории ${product.category}.",
-                cautions = "Соблюдайте баланс суточной калорийности и водного режима."
-            )
-        }
+        null
     }
 }

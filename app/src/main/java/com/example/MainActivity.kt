@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -33,11 +34,20 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -46,11 +56,18 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import com.example.ui.UiEvent
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,6 +88,7 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -86,14 +104,12 @@ import com.example.ui.components.PortionDialog
 import com.example.ui.screens.CatalogScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DiaryScreen
-import com.example.ui.screens.LoginScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.ElectricLime
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.WildWatermelon
@@ -105,28 +121,75 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+
+        try {
+            if (com.google.firebase.FirebaseApp.getApps(this).isNotEmpty()) {
+                val firebaseAppCheck = com.google.firebase.appcheck.FirebaseAppCheck.getInstance()
+                if (BuildConfig.DEBUG) {
+                    firebaseAppCheck.installAppCheckProviderFactory(
+                        com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory.getInstance()
+                    )
+                } else {
+                    firebaseAppCheck.installAppCheckProviderFactory(
+                        com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderFactory.getInstance()
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("AppCheck", "Firebase App Check initialization skipped: ${e.message}")
+            }
+        }
+
         setContent {
-            MyApplicationTheme {
-                KbzhuApp()
+            val viewModel: MainViewModel = viewModel()
+            val appThemeMode by viewModel.appThemeMode.collectAsStateWithLifecycle()
+
+            val isDark = when (appThemeMode) {
+                "light" -> false
+                "system" -> androidx.compose.foundation.isSystemInDarkTheme()
+                else -> true
+            }
+
+            LaunchedEffect(isDark) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (isDark) {
+                        androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    } else {
+                        androidx.activity.SystemBarStyle.light(
+                            android.graphics.Color.TRANSPARENT,
+                            android.graphics.Color.TRANSPARENT
+                        )
+                    }
+                )
+            }
+
+            MyApplicationTheme(themeMode = appThemeMode) {
+                KbzhuApp(viewModel)
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
     val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
     val currentDate by viewModel.currentDate.collectAsStateWithLifecycle()
     val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
     val entries by viewModel.currentDayEntries.collectAsStateWithLifecycle()
+    val yesterdayEntries by viewModel.yesterdayEntries.collectAsStateWithLifecycle()
 
     val filteredProducts by viewModel.filteredProducts.collectAsStateWithLifecycle()
+    val onlineProducts by viewModel.onlineSearchResults.collectAsStateWithLifecycle()
+    val allSavedMeals by viewModel.allSavedMeals.collectAsStateWithLifecycle()
+    val isOnlineSearching by viewModel.isOnlineSearching.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedCategory by viewModel.selectedCategory.collectAsStateWithLifecycle()
 
     val activePortionProduct by viewModel.activePortionProduct.collectAsStateWithLifecycle()
     val activePortionMeal by viewModel.activePortionMeal.collectAsStateWithLifecycle()
+    val editingMealEntry by viewModel.editingMealEntry.collectAsStateWithLifecycle()
 
     val isScannerOpen by viewModel.isScannerOpen.collectAsStateWithLifecycle()
     val notFoundBarcode by viewModel.notFoundBarcode.collectAsStateWithLifecycle()
@@ -140,11 +203,17 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
     val currentWaterMl by viewModel.currentDayWater.collectAsStateWithLifecycle()
     val targetWaterMl by viewModel.targetWaterMl.collectAsStateWithLifecycle()
     val weightEntries by viewModel.weightEntries.collectAsStateWithLifecycle()
-    val googleFitData by viewModel.googleFitData.collectAsStateWithLifecycle()
-    val userAuthState by viewModel.authState.collectAsStateWithLifecycle()
+    val healthStepData by viewModel.healthStepData.collectAsStateWithLifecycle()
+
+    val effectiveTierGoal by viewModel.effectiveTierGoal.collectAsStateWithLifecycle()
+    val selectedTierFilter by viewModel.selectedTierFilter.collectAsStateWithLifecycle()
+    val tierMode by viewModel.tierMode.collectAsStateWithLifecycle()
+    val appLanguage by viewModel.appLanguage.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
-    var isAiPhotoDialogOpen by remember { mutableStateOf(false) }
+    var isAiPhotoDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var isAddMenuOpen by rememberSaveable { mutableStateOf(false) }
+    val activeProductForInfo by viewModel.activeProductForInfo.collectAsStateWithLifecycle()
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -153,25 +222,33 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
     val activityPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        viewModel.googleFitManager.registerStepSensor()
+        viewModel.healthConnectManager.registerStepSensor()
+    }
+
+    val healthConnectPermissionLauncher = rememberLauncherForActivityResult(
+        contract = androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()
+    ) { grantedPermissions ->
+        if (grantedPermissions.containsAll(viewModel.healthConnectManager.permissions)) {
+            viewModel.syncHealthConnect { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "Разрешение Health Connect не предоставлено", Toast.LENGTH_SHORT).show()
+        }
     }
 
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
-                activityPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
-            }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
         InactivityReminderManager.scheduleReminder(context)
     }
 
+    val isChangelogOpen by viewModel.isChangelogOpen.collectAsStateWithLifecycle()
+
+    BackHandler(enabled = isChangelogOpen) {
+        viewModel.closeChangelog()
+    }
+
     // Handle system back navigation: return to Dashboard tab if on secondary tab
-    BackHandler(enabled = selectedTab != AppTab.DASHBOARD) {
+    BackHandler(enabled = !isChangelogOpen && selectedTab != AppTab.DASHBOARD) {
         viewModel.selectTab(AppTab.DASHBOARD)
     }
 
@@ -183,20 +260,63 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        viewModel.uiEvent.collect { event ->
+            when (event) {
+                is UiEvent.ShowUndoSnackbar -> {
+                    scope.launch {
+                        val result = snackbarHostState.showSnackbar(
+                            message = event.message,
+                            actionLabel = if (appLanguage == "en") "Undo" else "Отменить",
+                            duration = SnackbarDuration.Short
+                        )
+                        if (result == SnackbarResult.ActionPerformed) {
+                            event.onUndo()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    val isOnboardingCompleted by viewModel.isOnboardingCompleted.collectAsStateWithLifecycle()
     val displayDate = viewModel.formatDisplayDate(currentDate)
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(DarkBackground),
-        containerColor = DarkBackground,
-        bottomBar = {
-            FitnessBottomBar(
-                selectedTab = selectedTab,
-                onTabSelect = { tab -> viewModel.selectTab(tab) }
-            )
+    LaunchedEffect(isOnboardingCompleted) {
+        if (isOnboardingCompleted) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+                    activityPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
+                }
+            }
         }
-    ) { innerPadding ->
+    }
+
+    if (!isOnboardingCompleted) {
+        com.example.ui.screens.OnboardingScreen(
+            onCompleteOnboarding = { age, gender, height, weight, targetWeight, activity, goal, enableNotifications ->
+                viewModel.completeOnboarding(age, gender, height, weight, targetWeight, activity, goal, enableNotifications)
+            }
+        )
+    } else {
+        Scaffold(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DarkBackground),
+            containerColor = DarkBackground,
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+            bottomBar = {
+                FitnessBottomBar(
+                    selectedTab = selectedTab,
+                    appLanguage = appLanguage,
+                    onTabSelect = { tab -> viewModel.selectTab(tab) },
+                    onOpenAddMenu = { isAddMenuOpen = true }
+                )
+            }
+        ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -213,29 +333,36 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
                             displayDateText = displayDate,
                             userProfile = userProfile,
                             entries = entries,
+                            yesterdayEntries = yesterdayEntries,
                             dailyCaloriesMap = weekCaloriesMap,
                             weeklyTrendData = weeklyTrendData,
                             currentWaterMl = currentWaterMl,
                             targetWaterMl = targetWaterMl,
                             weightEntries = weightEntries,
                             onLogWeight = { w, d -> viewModel.logWeight(w, d) },
+                            onDeleteWeightEntry = { d -> viewModel.deleteWeightEntry(d) },
+                            onRepeatYesterdayMeal = { mealType -> viewModel.repeatYesterdayMeal(mealType) },
                             onSelectDate = { date -> viewModel.setDate(date) },
                             onAddWater = { amount -> viewModel.addWater(amount) },
                             onRemoveLastWater = { viewModel.removeLastWater() },
                             onOpenCatalogForMeal = { mealType ->
-                                viewModel.setTargetMeal(mealType)
-                                viewModel.selectTab(AppTab.CATALOG)
+                                viewModel.openCatalogForMeal(mealType)
                             },
                             onOpenScanner = {
                                 viewModel.openScanner(activePortionMeal)
                             },
                             onNavigateToTab = { targetTab -> viewModel.selectTab(targetTab) },
-                            onAddAiMeal = { dishName, grams, calories, p, f, c, mealType ->
-                                viewModel.addAiMealEntry(dishName, grams, calories, p, f, c, mealType)
+                            onEditEntry = { entry ->
+                                viewModel.openEditMealEntry(entry)
+                            },
+                            onSaveAiMealEntries = { entries ->
+                                scope.launch { viewModel.addAiMealEntries(entries) }
                             },
                             onOpenCameraPhoto = {
                                 isAiPhotoDialogOpen = true
-                            }
+                            },
+                            effectiveTierGoal = effectiveTierGoal,
+                            appLanguage = appLanguage
                         )
                     }
 
@@ -250,25 +377,60 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
                             onTodayClick = { viewModel.setDate(java.time.LocalDate.now()) },
                             onSelectDate = { date -> viewModel.setDate(date) },
                             onAddProductClick = { mealType ->
-                                viewModel.selectTab(AppTab.CATALOG)
+                                viewModel.openCatalogForMeal(mealType)
+                            },
+                            onEditEntry = { entry ->
+                                viewModel.openEditMealEntry(entry)
                             },
                             onDeleteEntry = { entry ->
                                 viewModel.deleteMealEntry(entry)
-                            }
+                            },
+                            onCopyMealToToday = { mealType ->
+                                viewModel.copyMealSectionToDate(currentDate.toString(), java.time.LocalDate.now().toString(), mealType)
+                            },
+                            onCopyMealToDate = { mealType, targetDateStr ->
+                                viewModel.copyMealSectionToDate(currentDate.toString(), targetDateStr, mealType)
+                            },
+                            onSaveMealAsDish = { name, mealEntries ->
+                                viewModel.saveMealAsDish(name, mealEntries)
+                            },
+                            effectiveTierGoal = effectiveTierGoal,
+                            appLanguage = appLanguage
                         )
                     }
 
                     AppTab.CATALOG -> {
                         CatalogScreen(
                             products = filteredProducts,
+                            onlineProducts = onlineProducts,
+                            savedMeals = allSavedMeals,
+                            isOnlineSearching = isOnlineSearching,
                             searchQuery = searchQuery,
                             selectedCategory = selectedCategory,
+                            selectedTierFilter = selectedTierFilter,
+                            effectiveTierGoal = effectiveTierGoal,
                             targetMealType = activePortionMeal,
                             onSearchQueryChange = { viewModel.searchQuery.value = it },
                             onCategoryChange = { viewModel.selectedCategory.value = it },
+                            onSelectTierFilter = { tier -> viewModel.setSelectedTierFilter(tier) },
                             onSelectTargetMeal = { meal -> viewModel.setTargetMeal(meal) },
+                            onToggleFavorite = { product -> viewModel.toggleFavoriteProduct(product.id, !product.isFavorite) },
+                            onAddSavedMealClick = { savedMeal -> viewModel.addSavedMealToDiary(savedMeal, activePortionMeal) },
+                            onDeleteSavedMealClick = { savedMeal -> viewModel.deleteSavedMeal(savedMeal) },
                             onProductClick = { product ->
                                 viewModel.openPortionDialog(product, activePortionMeal)
+                            },
+                            onOpenProductInfo = { product ->
+                                viewModel.openProductInfo(product)
+                            },
+                            onEditCustomProduct = { product ->
+                                viewModel.openEditCustomProduct(product)
+                            },
+                            onCreateProductWithQuery = { q ->
+                                viewModel.openCreateProductPrefilled(name = q)
+                            },
+                            onOpenAiRecognition = {
+                                viewModel.selectTab(AppTab.DASHBOARD)
                             },
                             onCreateProductClick = {
                                 viewModel.openCreateProduct()
@@ -278,19 +440,21 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
                             },
                             onDeleteProduct = { product ->
                                 viewModel.deleteProduct(product)
-                            }
+                            },
+                            appLanguage = appLanguage
                         )
                     }
 
                     AppTab.PROFILE -> {
                         ProfileScreen(
                             userProfile = userProfile,
-                            onSaveProfile = { age, gender, height, weight, activity, goal, isManual, cal, p, f, c ->
+                            onSaveProfile = { age, gender, height, weight, targetWeight, activity, goal, isManual, cal, p, f, c ->
                                 viewModel.saveProfile(
                                     age = age,
                                     gender = gender,
                                     heightCm = height,
                                     weightKg = weight,
+                                    targetWeightKg = targetWeight,
                                     activityLevel = activity,
                                     goal = goal,
                                     isManual = isManual,
@@ -299,34 +463,31 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
                                     customF = f,
                                     customC = c
                                 )
-                            }
+                            },
+                            appLanguage = appLanguage
                         )
                     }
 
                     AppTab.SETTINGS -> {
                         SettingsScreen(
                             userProfile = userProfile,
-                            googleFitData = googleFitData,
-                            userAuthState = userAuthState,
-                            onSyncGoogleFit = { viewModel.syncGoogleFit() },
-                            onToggleGoogleFitAutoSync = { enabled -> viewModel.toggleGoogleFitAutoSync(enabled) },
-                            onLoginWithGoogle = { email -> viewModel.loginWithGoogle(email) },
-                            onLoginWithEmail = { email -> viewModel.loginWithEmail(email) },
-                            onLogoutUser = { viewModel.logoutUser() },
-                            onNavigateToProfile = { viewModel.selectTab(AppTab.PROFILE) },
-                            onNavigateToCatalog = { viewModel.selectTab(AppTab.CATALOG) }
-                        )
-                    }
-
-                    AppTab.LOGIN -> {
-                        LoginScreen(
-                            onLoginSuccess = { email, name ->
-                                viewModel.loginWithGoogle(email, name)
-                                viewModel.selectTab(AppTab.DASHBOARD)
+                            healthStepData = healthStepData,
+                            onRequestHealthPermissions = {
+                                healthConnectPermissionLauncher.launch(viewModel.healthConnectManager.permissions)
                             },
-                            onSkipAsGuest = {
-                                viewModel.selectTab(AppTab.DASHBOARD)
-                            }
+                            onSyncHealthConnect = { onResult -> viewModel.syncHealthConnect(onResult) },
+                            onSaveWaterGoal = { isManual, customMl -> viewModel.setWaterGoalSetting(isManual, customMl) },
+                            onExportBackup = { uri, onComplete -> viewModel.exportBackupToUri(context, uri, onComplete) },
+                            onImportBackup = { uri -> viewModel.parseBackupFromUri(context, uri) },
+                            onConfirmRestoreBackup = { backupData, onComplete -> viewModel.restoreBackup(backupData, onComplete) },
+                            onSetLanguage = { lang -> viewModel.setAppLanguage(lang) },
+                            onSetThemeMode = { mode -> viewModel.setAppThemeMode(mode) },
+                            tierMode = tierMode,
+                            onSetTierMode = { mode -> viewModel.setTierMode(mode) },
+                            onOpenChangelog = { viewModel.openChangelog() },
+                            onNavigateToProfile = { viewModel.selectTab(AppTab.PROFILE) },
+                            onNavigateToCatalog = { viewModel.selectTab(AppTab.CATALOG) },
+                            appLanguage = appLanguage
                         )
                     }
                 }
@@ -371,9 +532,15 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
+    val scannerState by viewModel.scannerState.collectAsStateWithLifecycle()
+    val prefilledProductData by viewModel.prefilledProductData.collectAsStateWithLifecycle()
+
     // Modal Camera Barcode Scanner
     if (isScannerOpen) {
         BarcodeScannerDialog(
+            scannerState = scannerState,
+            onResetScannerState = { viewModel.resetScannerState() },
+            onOpenCreateProduct = { barcode -> viewModel.openCreateProduct(barcode) },
             onDismiss = { viewModel.closeScanner() },
             onBarcodeScanned = { barcode ->
                 viewModel.processScannedBarcode(barcode)
@@ -381,91 +548,210 @@ fun KbzhuApp(viewModel: MainViewModel = viewModel()) {
         )
     }
 
-    // Barcode Not Found Dialog
-    notFoundBarcode?.let { code ->
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissNotFoundBarcode() },
-            containerColor = DarkSurface,
-            shape = RoundedCornerShape(20.dp),
-            title = {
-                Text(
-                    text = "Штрих-код не найден",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = TextPrimary
-                )
-            },
-            text = {
-                Text(
-                    text = "Продукт со штрих-кодом $code отсутствует в базе. Желаете создать новый продукт с этим штрих-кодом?",
-                    color = TextSecondary,
-                    fontSize = 14.sp
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val currentNotFound = code
-                        viewModel.dismissNotFoundBarcode()
-                        viewModel.closeScanner()
-                        viewModel.openCreateProduct(currentNotFound)
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = WildWatermelon,
-                        contentColor = Color(0xFF101014)
-                    ),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.testTag("create_scanned_product_button")
-                ) {
-                    Text("Создать продукт", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { viewModel.dismissNotFoundBarcode() }) {
-                    Text("Отмена", color = TextTertiary)
-                }
-            }
-        )
-    }
-
     // Modal Portion Dialog
     activePortionProduct?.let { product ->
+        val currentEdit = editingMealEntry
         PortionDialog(
             product = product,
             initialMealType = activePortionMeal,
+            initialGrams = currentEdit?.weightGrams ?: 100.0,
+            isEditMode = currentEdit != null,
+            effectiveTierGoal = effectiveTierGoal,
+            onOpenProductInfo = { prod -> viewModel.openProductInfo(prod) },
             onDismiss = { viewModel.closePortionDialog() },
             onConfirm = { mealType, grams ->
                 viewModel.addPortion(mealType, grams)
-            }
+            },
+            appLanguage = appLanguage
         )
     }
+
+    // Modal Product Science Info BottomSheet
+    activeProductForInfo?.let { product ->
+        com.example.ui.components.ProductInfoBottomSheet(
+            product = product,
+            onFetchInfo = { p, callback ->
+                viewModel.fetchProductScienceInfo(p, callback)
+            },
+            onDismiss = { viewModel.closeProductInfo() },
+            appLanguage = appLanguage
+        )
+    }
+
+    val editingProduct by viewModel.editingProduct.collectAsStateWithLifecycle()
 
     // Modal Create Custom Product Dialog
     if (isCreateProductOpen) {
         CreateProductDialog(
             initialBarcode = createProductInitialBarcode,
+            prefilledData = prefilledProductData,
+            isEditMode = editingProduct != null,
             onDismiss = { viewModel.closeCreateProduct() },
             onSaveProduct = { name, category, cal, p, f, c, barcode ->
-                viewModel.saveCustomProduct(name, category, cal, p, f, c, barcode)
-            }
+                val currentEditing = editingProduct
+                if (currentEditing != null) {
+                    viewModel.updateCustomProduct(
+                        currentEditing.copy(
+                            name = name,
+                            category = category,
+                            calories = cal,
+                            protein = p,
+                            fat = f,
+                            carbs = c,
+                            barcode = barcode
+                        )
+                    )
+                } else {
+                    viewModel.saveCustomProduct(name, category, cal, p, f, c, barcode)
+                }
+            },
+            appLanguage = appLanguage
         )
     }
+
+    val aiPhotoState by viewModel.aiPhotoState.collectAsStateWithLifecycle()
 
     // Modal AI Food Photo Analysis Dialog
     if (isAiPhotoDialogOpen) {
         AiFoodPhotoDialog(
-            onDismiss = { isAiPhotoDialogOpen = false },
-            onAddMeal = { dishName, grams, calories, p, f, c, mealType ->
-                viewModel.addAiMealEntry(dishName, grams, calories, p, f, c, mealType)
-            }
+            aiPhotoState = aiPhotoState,
+            onRequestCameraTempUri = { ctx -> viewModel.createCameraTempUri(ctx) },
+            onProcessPhotoUri = { ctx, uri -> viewModel.processAiPhotoUri(ctx, uri) },
+            onUpdateDishName = { name -> viewModel.updateAiPhotoDishName(name) },
+            onUpdateItemName = { id, name -> viewModel.updateAiPhotoItemName(id, name) },
+            onUpdateItemGrams = { id, text -> viewModel.updateAiPhotoItemGrams(id, text) },
+            onUpdateItemCalories = { id, text -> viewModel.updateAiPhotoItemCalories(id, text) },
+            onUpdateItemProtein = { id, text -> viewModel.updateAiPhotoItemProtein(id, text) },
+            onUpdateItemFat = { id, text -> viewModel.updateAiPhotoItemFat(id, text) },
+            onUpdateItemCarbs = { id, text -> viewModel.updateAiPhotoItemCarbs(id, text) },
+            onRemoveItem = { id -> viewModel.removeAiPhotoItem(id) },
+            onAddManualItem = { viewModel.addManualAiPhotoItem() },
+            onUpdateMealType = { type -> viewModel.updateAiPhotoMealType(type) },
+            onOpenCatalogWithSearch = { search ->
+                viewModel.searchQuery.value = search
+                viewModel.selectTab(AppTab.CATALOG)
+            },
+            currentDateString = currentDate.toString(),
+            effectiveTierGoal = effectiveTierGoal,
+            onDismiss = {
+                viewModel.clearAiPhotoState()
+                isAiPhotoDialogOpen = false
+            },
+            onSaveMealEntries = { entries ->
+                scope.launch { viewModel.addAiMealEntries(entries) }
+                viewModel.clearAiPhotoState()
+            },
+            appLanguage = appLanguage
         )
+    }
+
+    // Global ModalBottomSheet Action Menu (Search, Scan, Photo, AI Text)
+    val currentHour = java.time.LocalTime.now().hour
+    val currentMealType = when (currentHour) {
+        in 5..11 -> MealType.BREAKFAST
+        in 12..16 -> MealType.LUNCH
+        in 17..21 -> MealType.DINNER
+        else -> MealType.SNACK
+    }
+
+    if (isAddMenuOpen) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+        ModalBottomSheet(
+            onDismissRequest = { isAddMenuOpen = false },
+            sheetState = sheetState,
+            containerColor = DarkSurface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (appLanguage == "en") "Add to Log (${currentMealType.titleEn})" else "Добавить в дневник (${currentMealType.titleRu})",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    IconButton(onClick = { isAddMenuOpen = false }) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Закрыть", tint = TextSecondary)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Option 1: Search in Catalog
+                    ActionMenuRow(
+                        icon = Icons.Default.Search,
+                        title = if (appLanguage == "en") "Search Food" else "Найти продукт",
+                        subtitle = if (appLanguage == "en") "Search catalog & open food database" else "Поиск по каталогу продуктов и открытой базе",
+                        onClick = {
+                            isAddMenuOpen = false
+                            viewModel.openCatalogForMeal(currentMealType)
+                        }
+                    )
+
+                    // Option 2: Scan Barcode
+                    ActionMenuRow(
+                        icon = Icons.Default.QrCodeScanner,
+                        title = if (appLanguage == "en") "Scan Barcode" else "Сканировать штрих-код",
+                        subtitle = if (appLanguage == "en") "Scan package barcode" else "Быстрое сканирование кода на упаковке",
+                        onClick = {
+                            isAddMenuOpen = false
+                            viewModel.openScanner(currentMealType)
+                        }
+                    )
+
+                    // Option 3: Take Food Photo
+                    ActionMenuRow(
+                        icon = Icons.Default.CameraAlt,
+                        title = if (appLanguage == "en") "Food Photo AI" else "Сфотографировать блюдо",
+                        subtitle = if (appLanguage == "en") "AI recognition from photo" else "ИИ-анализ и распознавание порции по фото",
+                        onClick = {
+                            isAddMenuOpen = false
+                            isAiPhotoDialogOpen = true
+                        }
+                    )
+
+                    // Option 4: AI Express Text Entry
+                    ActionMenuRow(
+                        icon = Icons.Default.AutoAwesome,
+                        title = if (appLanguage == "en") "Express AI Text" else "Написать, что съели",
+                        subtitle = if (appLanguage == "en") "Type phrase (e.g. 2 eggs & coffee)" else "Экспресс-ввод фразой (например: 2 яйца и овсянка)",
+                        onClick = {
+                            isAddMenuOpen = false
+                            viewModel.selectTab(AppTab.DASHBOARD)
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
+    }
+
+    // Changelog Release Notes Screen
+    if (isChangelogOpen) {
+        com.example.ui.screens.ChangelogScreen(
+            onBackClick = { viewModel.closeChangelog() }
+        )
+    }
     }
 }
 
 @Composable
 fun FitnessBottomBar(
     selectedTab: AppTab,
+    appLanguage: String = "ru",
     onTabSelect: (AppTab) -> Unit,
+    onOpenAddMenu: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -489,51 +775,54 @@ fun FitnessBottomBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                    .padding(horizontal = 2.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 1. Главная
                 NavTabButton(
-                    title = "Главная",
+                    title = AppTab.DASHBOARD.title(appLanguage),
                     icon = Icons.Default.DonutLarge,
                     isSelected = selectedTab == AppTab.DASHBOARD,
                     onClick = { onTabSelect(AppTab.DASHBOARD) },
-                    tag = "tab_dashboard"
+                    tag = "tab_dashboard",
+                    modifier = Modifier.weight(1f)
                 )
 
                 // 2. Дневник
                 NavTabButton(
-                    title = "Дневник",
+                    title = AppTab.DIARY.title(appLanguage),
                     icon = Icons.AutoMirrored.Filled.MenuBook,
                     isSelected = selectedTab == AppTab.DIARY,
                     onClick = { onTabSelect(AppTab.DIARY) },
-                    tag = "tab_diary"
+                    tag = "tab_diary",
+                    modifier = Modifier.weight(1f)
                 )
 
-                // 3. Выделенная кнопка поиска (Лупа, без текста "Продукты", больше остальных)
-                SearchTabButton(
-                    isSelected = selectedTab == AppTab.CATALOG,
-                    onClick = { onTabSelect(AppTab.CATALOG) },
-                    tag = "tab_catalog"
+                // 3. Выделенная центральная кнопка Добавить (+)
+                AddCentralButton(
+                    onClick = onOpenAddMenu,
+                    tag = "central_add_button"
                 )
 
                 // 4. Профиль
                 NavTabButton(
-                    title = "Профиль",
+                    title = AppTab.PROFILE.title(appLanguage),
                     icon = Icons.Default.Person,
                     isSelected = selectedTab == AppTab.PROFILE,
                     onClick = { onTabSelect(AppTab.PROFILE) },
-                    tag = "tab_profile"
+                    tag = "tab_profile",
+                    modifier = Modifier.weight(1f)
                 )
 
                 // 5. Настройки
                 NavTabButton(
-                    title = "Настройки",
+                    title = AppTab.SETTINGS.title(appLanguage),
                     icon = Icons.Default.Settings,
                     isSelected = selectedTab == AppTab.SETTINGS,
                     onClick = { onTabSelect(AppTab.SETTINGS) },
-                    tag = "tab_settings"
+                    tag = "tab_settings",
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
@@ -546,13 +835,14 @@ private fun NavTabButton(
     icon: ImageVector,
     isSelected: Boolean,
     onClick: () -> Unit,
-    tag: String
+    tag: String,
+    modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = 4.dp, vertical = 4.dp)
             .testTag(tag),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -579,14 +869,14 @@ private fun NavTabButton(
             fontSize = 10.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
             color = if (isSelected) WildWatermelon else TextTertiary,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
 
 @Composable
-private fun SearchTabButton(
-    isSelected: Boolean,
+private fun AddCentralButton(
     onClick: () -> Unit,
     tag: String
 ) {
@@ -595,7 +885,7 @@ private fun SearchTabButton(
             .padding(horizontal = 2.dp)
             .size(52.dp)
             .shadow(
-                elevation = if (isSelected) 10.dp else 6.dp,
+                elevation = 8.dp,
                 shape = CircleShape,
                 spotColor = WildWatermelon
             )
@@ -608,22 +898,50 @@ private fun SearchTabButton(
                     )
                 )
             )
-            .then(
-                if (isSelected) {
-                    Modifier.border(2.dp, Color.White, CircleShape)
-                } else {
-                    Modifier.border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
-                }
-            )
+            .border(1.5.dp, Color.White.copy(alpha = 0.5f), CircleShape)
             .clickable(onClick = onClick)
             .testTag(tag),
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            imageVector = Icons.Default.Search,
-            contentDescription = "Поиск продуктов",
+            imageVector = Icons.Default.Add,
+            contentDescription = "Добавить в дневник",
             modifier = Modifier.size(28.dp),
-            tint = Color.White
+            tint = Color(0xFF101014)
         )
+    }
+}
+
+@Composable
+private fun ActionMenuRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(DarkCard)
+            .border(1.dp, DarkBorder, RoundedCornerShape(14.dp))
+            .clickable { onClick() }
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(WildWatermelonContainer),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = WildWatermelon, modifier = Modifier.size(20.dp))
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Text(text = title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+            Text(text = subtitle, fontSize = 11.sp, color = TextSecondary)
+        }
     }
 }

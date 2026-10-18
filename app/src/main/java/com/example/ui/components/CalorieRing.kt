@@ -26,6 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -37,6 +39,7 @@ import kotlin.math.roundToInt
 fun CalorieRing(
     consumedCalories: Double,
     targetCalories: Int,
+    appLanguage: String = "ru",
     modifier: Modifier = Modifier,
     ringSize: Dp = 145.dp
 ) {
@@ -52,17 +55,23 @@ fun CalorieRing(
         label = "calorie_sweep"
     )
 
-    val ringColor = if (consumed > target) {
-        Color(0xFFFB7185) // Alert coral if over-budget
-    } else {
-        WildWatermelon
+    val ringColor = when {
+        consumed > target -> Color(0xFFF87171)
+        consumed in (target * 0.95).toInt()..target -> Color(0xFF4ADE80)
+        else -> WildWatermelon
     }
 
     val isCompact = ringSize <= 160.dp
 
+    val desc = "Кольцо калорий: употреблено $consumed из $target ккал. ${if (remaining >= 0) "$remaining ккал осталось" else "${-remaining} ккал сверх нормы"}"
+
+    val trackColor = DarkBorder
+
     Box(
         contentAlignment = Alignment.Center,
-        modifier = modifier.size(ringSize)
+        modifier = modifier
+            .size(ringSize)
+            .semantics { contentDescription = desc }
     ) {
         Canvas(modifier = Modifier.size(ringSize - 10.dp)) {
             val strokeWidth = (if (isCompact) 11.dp else 16.dp).toPx()
@@ -72,7 +81,7 @@ fun CalorieRing(
 
             // Background circle track
             drawArc(
-                color = DarkBorder,
+                color = trackColor,
                 startAngle = -90f,
                 sweepAngle = 360f,
                 useCenter = false,
@@ -108,7 +117,11 @@ fun CalorieRing(
                 lineHeight = if (isCompact) 28.sp else 38.sp
             )
             Text(
-                text = if (remaining >= 0) "ккал осталось" else "ккал сверх нормы",
+                text = if (remaining >= 0) {
+                    if (appLanguage == "en") "kcal left" else "ккал осталось"
+                } else {
+                    if (appLanguage == "en") "kcal over goal" else "ккал сверх нормы"
+                },
                 fontSize = if (isCompact) 10.sp else 12.sp,
                 fontWeight = FontWeight.Medium,
                 color = TextSecondary

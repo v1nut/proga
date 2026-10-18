@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "104436950097",
+    "project_id": "kbzhu-ration",
+    "storage_bucket": "kbzhu-ration.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:104436950097:android:0d01b139c383e45db9c470",
+        "android_client_info": {
+          "package_name": "com.aistudio.kbzhu.rqxzvt"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAQ_M0KWIppnPqqSRhPvTwe87ChtGXM90E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

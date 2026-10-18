@@ -4,43 +4,42 @@ import com.example.data.model.Product
 
 object SmartFoodSearch {
 
+    private val unitTokens = setOf("г", "гр", "мл", "кг", "шт", "л", "пачка", "кусок", "стакан")
+
     private val aliasDictionary: Map<String, List<String>> = mapOf(
-        "яйца" to listOf("яйцо", "яичн"),
-        "яйцо" to listOf("яйца", "яичн"),
-        "яичница" to listOf("яйцо", "белок"),
-        "курица" to listOf("куриное", "филе", "грудка"),
-        "курицы" to listOf("куриное", "филе"),
-        "куриное" to listOf("курица", "филе"),
-        "цыпленок" to listOf("куриное"),
-        "яблоки" to listOf("яблоко"),
-        "яблоко" to listOf("яблоки"),
+        "яйца" to listOf("яйц", "яичн"),
+        "яйцо" to listOf("яйц", "яичн"),
+        "яичница" to listOf("яйц"),
+        "курица" to listOf("курин", "филе", "грудк"),
+        "куриное" to listOf("курин", "куриц"),
+        "цыпленок" to listOf("курин"),
+        "яблоки" to listOf("яблок"),
+        "яблоко" to listOf("яблок"),
         "бананы" to listOf("банан"),
-        "банан" to listOf("бананы"),
-        "огурцы" to listOf("огурец"),
-        "огурец" to listOf("огурцы"),
+        "банан" to listOf("банан"),
+        "огурцы" to listOf("огур"),
+        "огурец" to listOf("огур"),
         "помидоры" to listOf("помидор", "томат"),
-        "помидор" to listOf("помидоры", "томат"),
-        "томаты" to listOf("помидоры", "томат"),
-        "томат" to listOf("помидор", "помидоры"),
-        "гречка" to listOf("гречневая", "гречневая каша", "гречневая крупа"),
-        "греча" to listOf("гречневая", "гречка"),
-        "гречневая" to listOf("гречка"),
-        "овсянка" to listOf("овсяные", "геркулес"),
-        "овсяные" to listOf("овсянка", "геркулес"),
-        "геркулес" to listOf("овсянка", "овсяные"),
-        "макароны" to listOf("паста", "спагетти"),
-        "паста" to listOf("макароны"),
-        "рыба" to listOf("лосось", "семга", "тунец", "минтай", "горбуша"),
-        "семга" to listOf("лосось"),
-        "лосось" to listOf("семга"),
+        "помидор" to listOf("помидор", "томат"),
+        "томаты" to listOf("томат", "помидор"),
+        "гречка" to listOf("гречн", "гречк"),
+        "греча" to listOf("гречн", "гречк"),
+        "гречневая" to listOf("гречк", "гречн"),
+        "овсянка" to listOf("овсян", "геркулес"),
+        "овсяные" to listOf("овсян", "геркулес"),
+        "геркулес" to listOf("овсян", "геркулес"),
+        "макароны" to listOf("паст", "спагетти", "макарон"),
+        "паста" to listOf("макарон", "паст"),
+        "рыба" to listOf("лосось", "семга", "тунец", "минтай", "горбуш"),
+        "семга" to listOf("лосось", "семг"),
+        "лосось" to listOf("семг", "лосос"),
         "творожок" to listOf("творог"),
-        "творог" to listOf("творожок"),
-        "молоко" to listOf("молочные"),
-        "креветка" to listOf("креветки"),
-        "креветки" to listOf("креветка"),
-        "хлеб" to listOf("хлебцы", "цельнозерновой"),
+        "творог" to listOf("творожок", "творог"),
+        "креветка" to listOf("креветк"),
+        "креветки" to listOf("креветк"),
+        "хлеб" to listOf("хлеб", "хлебц"),
         "индейка" to listOf("индейк"),
-        "говядина" to listOf("говяж")
+        "говядина" to listOf("говяд")
     )
 
     private fun normalize(text: String): String {
@@ -50,14 +49,18 @@ object SmartFoodSearch {
             .trim()
     }
 
-    /**
-     * Extracts common Russian stem prefix (simple stemming without inflections)
-     */
-    private fun getStem(word: String): String {
-        val norm = normalize(word)
+    private fun getTokens(text: String): List<String> {
+        val rawTokens = normalize(text).split(Regex("\\s+")).filter { it.isNotBlank() }
+        return rawTokens.filter { token ->
+            val clean = token.filter { it.isLetter() }
+            clean.length >= 3 && clean !in unitTokens
+        }
+    }
+
+    fun getStem(word: String): String {
+        val norm = normalize(word).filter { it.isLetter() }
         if (norm.length <= 3) return norm
 
-        // Strip common Russian noun and adjective endings
         val endings = listOf("ное", "ная", "ный", "ных", "ные", "ого", "ему", "ыми", "ями", "ей", "ов", "ев", "ам", "ям", "ах", "ях", "ка", "ки", "ку", "ке", "ко", "цы", "ца", "це", "ое", "ые", "ая", "яя", "ий", "ый", "ой", "а", "я", "о", "е", "ы", "и", "у", "ю")
         for (ending in endings) {
             if (norm.endsWith(ending) && (norm.length - ending.length) >= 3) {
@@ -67,45 +70,81 @@ object SmartFoodSearch {
         return norm
     }
 
-    /**
-     * Checks if product matches user search query taking into account
-     * synonyms, plurals/singulars, and root forms (e.g. "яйца" -> "яйцо куриное").
-     */
+    fun matchesToken(product: Product, qToken: String): Boolean {
+        val qStem = getStem(qToken)
+        val aliases = aliasDictionary[qToken] ?: emptyList()
+        val nameTokens = getTokens(product.name)
+
+        return nameTokens.any { nToken ->
+            val nStem = getStem(nToken)
+
+            nToken.startsWith(qToken) ||
+            nToken.startsWith(qStem) ||
+            qToken.startsWith(nStem) ||
+            nStem.startsWith(qStem) ||
+            qStem.startsWith(nStem) ||
+            aliases.any { alias -> nToken.startsWith(alias) || nStem.startsWith(alias) }
+        }
+    }
+
     fun matches(product: Product, query: String): Boolean {
         val cleanQuery = normalize(query)
         if (cleanQuery.isBlank()) return true
 
-        val productNameNorm = normalize(product.name)
-        val productCategoryNorm = normalize(product.category)
+        val queryTokens = getTokens(query)
+        if (queryTokens.isEmpty()) return true
 
-        // 1. Direct contains check
-        if (productNameNorm.contains(cleanQuery) || productCategoryNorm.contains(cleanQuery)) {
-            return true
+        return queryTokens.all { qToken -> matchesToken(product, qToken) }
+    }
+
+    fun filterAndSort(products: List<Product>, query: String): List<Product> {
+        val cleanQuery = normalize(query)
+        if (cleanQuery.isBlank()) return products
+
+        val queryTokens = getTokens(query)
+        if (queryTokens.isEmpty()) return products
+
+        val allMatches = products.filter { p ->
+            queryTokens.all { qToken -> matchesToken(p, qToken) }
         }
 
-        val queryTokens = cleanQuery.split(Regex("\\s+")).filter { it.isNotBlank() }
-        val nameTokens = productNameNorm.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val sortedAllMatches = sortProducts(allMatches, cleanQuery, queryTokens)
 
-        // 2. Check alias dictionary
-        for (qToken in queryTokens) {
-            val aliases = aliasDictionary[qToken] ?: emptyList()
-            for (alias in aliases) {
-                if (productNameNorm.contains(alias) || productCategoryNorm.contains(alias)) {
-                    return true
-                }
-            }
+        if (sortedAllMatches.size >= 3) {
+            return sortedAllMatches
         }
 
-        // 3. Stemming match: if query stem is prefix of any name token or vice versa
-        val queryStems = queryTokens.map { getStem(it) }
-        val nameStems = nameTokens.map { getStem(it) }
+        val allMatchIds = sortedAllMatches.map { it.id }.toSet()
+        val partialMatches = products.filter { p ->
+            p.id !in allMatchIds && queryTokens.any { qToken -> matchesToken(p, qToken) }
+        }
 
-        return queryStems.all { qStem ->
-            nameStems.any { nStem ->
-                qStem.startsWith(nStem) || nStem.startsWith(qStem) ||
-                        (qStem.length >= 4 && nStem.contains(qStem)) ||
-                        (nStem.length >= 4 && qStem.contains(nStem))
-            }
+        val sortedPartialMatches = sortProducts(partialMatches, cleanQuery, queryTokens)
+
+        return sortedAllMatches + sortedPartialMatches
+    }
+
+    private fun sortProducts(productsList: List<Product>, cleanQuery: String, queryTokens: List<String>): List<Product> {
+        return productsList.sortedWith { p1, p2 ->
+            val p1NameNorm = normalize(p1.name)
+            val p2NameNorm = normalize(p2.name)
+
+            val p1StartsWith = p1NameNorm.startsWith(cleanQuery)
+            val p2StartsWith = p2NameNorm.startsWith(cleanQuery)
+
+            if (p1StartsWith && !p2StartsWith) return@sortedWith -1
+            if (!p1StartsWith && p2StartsWith) return@sortedWith 1
+
+            val p1Tokens = getTokens(p1.name)
+            val p2Tokens = getTokens(p2.name)
+
+            val p1ExactWord = queryTokens.any { qt -> p1Tokens.contains(qt) }
+            val p2ExactWord = queryTokens.any { qt -> p2Tokens.contains(qt) }
+
+            if (p1ExactWord && !p2ExactWord) return@sortedWith -1
+            if (!p1ExactWord && p2ExactWord) return@sortedWith 1
+
+            p1.name.compareTo(p2.name, ignoreCase = true)
         }
     }
 }

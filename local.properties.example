@@ -1,0 +1,6 @@
+# Example local.properties configuration for KBZHU Racion
+# Replace with your local Android SDK location:
+sdk.dir=C\:\\Users\\Username\\AppData\\Local\\Android\\Sdk
+
+# Optional custom Gemini API Key override for development/testing:
+# GEMINI_API_KEY=AIzaSyYourApiKeyHere

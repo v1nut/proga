@@ -27,14 +27,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +66,17 @@ enum class TrendMode(val title: String) {
     MACROS("БЖУ")
 }
 
+private fun formatDaysWord(count: Int): String {
+    val rem10 = count % 10
+    val rem100 = count % 100
+    return when {
+        rem100 in 11..19 -> "дней"
+        rem10 == 1 -> "день"
+        rem10 in 2..4 -> "дня"
+        else -> "дней"
+    }
+}
+
 @Composable
 fun WeeklyTrendsCard(
     weeklyData: List<DayTrendData>,
@@ -73,13 +84,34 @@ fun WeeklyTrendsCard(
     targetProtein: Int,
     targetFat: Int,
     targetCarbs: Int,
+    appLanguage: String = "ru",
     modifier: Modifier = Modifier
 ) {
     var selectedMode by remember { mutableStateOf(TrendMode.CALORIES) }
     var selectedPointIndex by remember { mutableIntStateOf(-1) }
 
-    val avgCalories = remember(weeklyData) {
-        if (weeklyData.isEmpty()) 0 else (weeklyData.sumOf { it.calories } / weeklyData.size).roundToInt()
+    val today = LocalDate.now()
+
+    // Completed days (excluding today and excluding zero days)
+    val completedDaysWithEntries = remember(weeklyData) {
+        weeklyData.filter { it.date < today && it.calories > 0 }
+    }
+
+    val completedCount = completedDaysWithEntries.size
+    val avgCalories = if (completedCount > 0) {
+        (completedDaysWithEntries.sumOf { it.calories } / completedCount).roundToInt()
+    } else 0
+
+    val ruLocale = remember { Locale("ru") }
+
+    val subtitleText = if (completedCount > 0) {
+        if (appLanguage == "en") {
+            String.format(ruLocale, "Avg %,d kcal/day over %d logged %s", avgCalories, completedCount, if (completedCount == 1) "day" else "days")
+        } else {
+            String.format(ruLocale, "В среднем %,d ккал/день за %d %s с записями", avgCalories, completedCount, formatDaysWord(completedCount))
+        }
+    } else {
+        if (appLanguage == "en") "No completed logged days yet" else "Нет завершённых дней с записями"
     }
 
     Column(
@@ -98,13 +130,13 @@ fun WeeklyTrendsCard(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Динамика за 7 дней",
+                    text = if (appLanguage == "en") "7-Day Activity" else "Динамика за 7 дней",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
                 Text(
-                    text = "В среднем: $avgCalories ккал/день",
+                    text = subtitleText,
                     fontSize = 11.sp,
                     color = TextSecondary,
                     maxLines = 1
@@ -120,6 +152,9 @@ fun WeeklyTrendsCard(
             ) {
                 TrendMode.entries.forEach { mode ->
                     val isSelected = selectedMode == mode
+                    val modeTitle = if (appLanguage == "en") {
+                        if (mode == TrendMode.CALORIES) "Calories" else "Macros"
+                    } else mode.title
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
@@ -131,7 +166,7 @@ fun WeeklyTrendsCard(
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = mode.title,
+                            text = modeTitle,
                             fontSize = 11.sp,
                             maxLines = 1,
                             softWrap = false,
@@ -148,7 +183,11 @@ fun WeeklyTrendsCard(
         // Tooltip or Legend
         if (selectedPointIndex in weeklyData.indices) {
             val point = weeklyData[selectedPointIndex]
-            val dateLabel = DateTimeFormatter.ofPattern("d MMM (EEE)", Locale("ru")).format(point.date)
+            val isTodayDate = point.date == today
+            val dateLocale = if (appLanguage == "en") Locale.ENGLISH else ruLocale
+            val todaySuffix = if (isTodayDate) (if (appLanguage == "en") " • Today (in progress)" else " • Сегодня (в процессе)") else ""
+            val dateLabel = DateTimeFormatter.ofPattern("d MMM (EEE)", dateLocale).format(point.date) + todaySuffix
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -160,15 +199,17 @@ fun WeeklyTrendsCard(
             ) {
                 Text(text = dateLabel, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                 if (selectedMode == TrendMode.CALORIES) {
+                    val calFmt = if (appLanguage == "en") "%,d kcal (target: %,d)" else "%,d ккал (цель: %,d)"
                     Text(
-                        text = "${point.calories.roundToInt()} ккал (цель: $targetCalories)",
+                        text = String.format(dateLocale, calFmt, point.calories.roundToInt(), targetCalories),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = WildWatermelon
                     )
                 } else {
+                    val macroFmt = if (appLanguage == "en") "P: %.1fg • F: %.1fg • C: %.1fg" else "Б: %.1fг • Ж: %.1fг • У: %.1fг"
                     Text(
-                        text = String.format(Locale.US, "Б: %.0fг • Ж: %.0fг • У: %.0fг", point.protein, point.fat, point.carbs),
+                        text = String.format(dateLocale, macroFmt, point.protein, point.fat, point.carbs),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
@@ -183,19 +224,21 @@ fun WeeklyTrendsCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (selectedMode == TrendMode.CALORIES) {
-                    LegendItem(label = "Калории", color = WildWatermelon)
-                    LegendItem(label = "Цель ($targetCalories)", color = TextTertiary, isDashed = true)
+                    LegendItem(label = if (appLanguage == "en") "Calories" else "Калории (столбцы)", color = WildWatermelon)
+                    LegendItem(label = if (appLanguage == "en") "Target (${String.format(ruLocale, "%,d", targetCalories)})" else "Норма (${String.format(ruLocale, "%,d", targetCalories)})", color = TextTertiary, isDashed = true)
                 } else {
-                    LegendItem(label = "Белки", color = ProteinColor)
-                    LegendItem(label = "Жиры", color = FatColor)
-                    LegendItem(label = "Углеводы", color = CarbsColor)
+                    LegendItem(label = if (appLanguage == "en") "Protein" else "Белки", color = ProteinColor)
+                    LegendItem(label = if (appLanguage == "en") "Fat" else "Жиры", color = FatColor)
+                    LegendItem(label = if (appLanguage == "en") "Carbs" else "Углеводы", color = CarbsColor)
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Line Chart Canvas
+        val trendDesc = String.format(ruLocale, "Столбчатый график калорий за 7 дней. В среднем %,d ккал в день за %d дней с записями. Норма %,d ккал.", avgCalories, completedCount, targetCalories)
+
+        // Bar Chart Canvas
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -205,12 +248,13 @@ fun WeeklyTrendsCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(150.dp)
+                    .semantics { contentDescription = trendDesc }
                     .pointerInput(weeklyData, selectedMode) {
                         detectTapGestures { offset ->
                             val count = weeklyData.size
                             if (count > 0) {
-                                val stepX = size.width / (count - 1).coerceAtLeast(1)
-                                val index = ((offset.x + stepX / 2) / stepX).toInt().coerceIn(0, count - 1)
+                                val barWidthSlot = size.width / count
+                                val index = (offset.x / barWidthSlot).toInt().coerceIn(0, count - 1)
                                 selectedPointIndex = if (selectedPointIndex == index) -1 else index
                             }
                         }
@@ -220,120 +264,89 @@ fun WeeklyTrendsCard(
 
                 val count = weeklyData.size
                 val w = size.width
-                val h = size.height - 24.dp.toPx() // leave space for bottom date labels
-                val stepX = w / (count - 1).coerceAtLeast(1)
+                val h = size.height - 22.dp.toPx() // leave space for bottom date labels
+                val slotWidth = w / count
+                val barWidth = (slotWidth * 0.48f).coerceAtMost(28.dp.toPx())
+
+                val maxVal = maxOf(
+                    targetCalories.toDouble(),
+                    weeklyData.maxOfOrNull { it.calories } ?: 2000.0
+                ) * 1.18
+
+                fun getY(cal: Double): Float {
+                    val ratio = (cal / maxVal).toFloat().coerceIn(0f, 1f)
+                    return h * (1f - ratio)
+                }
+
+                // Target dashed guideline
+                val targetY = getY(targetCalories.toDouble())
+                drawLine(
+                    color = Color(0xFF5A5A6E),
+                    start = Offset(0f, targetY),
+                    end = Offset(w, targetY),
+                    strokeWidth = 1.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
+                )
 
                 if (selectedMode == TrendMode.CALORIES) {
-                    val maxVal = maxOf(targetCalories.toDouble(), weeklyData.maxOfOrNull { it.calories } ?: 2000.0) * 1.15
-                    val minVal = 0.0
-
-                    fun getY(cal: Double): Float {
-                        val ratio = ((cal - minVal) / (maxVal - minVal)).toFloat().coerceIn(0f, 1f)
-                        return h * (1f - ratio)
-                    }
-
-                    // Target dashed guideline
-                    val targetY = getY(targetCalories.toDouble())
-                    drawLine(
-                        color = Color(0xFF4A4A58),
-                        start = Offset(0f, targetY),
-                        end = Offset(w, targetY),
-                        strokeWidth = 1.5.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
-                    )
-
-                    // Path for curve and gradient fill
-                    val linePath = Path()
-                    val fillPath = Path()
-
-                    val points = weeklyData.mapIndexed { i, d ->
-                        Offset(i * stepX, getY(d.calories))
-                    }
-
-                    if (points.isNotEmpty()) {
-                        linePath.moveTo(points[0].x, points[0].y)
-                        fillPath.moveTo(points[0].x, h)
-                        fillPath.lineTo(points[0].x, points[0].y)
-
-                        for (i in 1 until points.size) {
-                            val pPrev = points[i - 1]
-                            val pCurr = points[i]
-                            val cx1 = pPrev.x + (pCurr.x - pPrev.x) / 2f
-                            val cy1 = pPrev.y
-                            val cx2 = pPrev.x + (pCurr.x - pPrev.x) / 2f
-                            val cy2 = pCurr.y
-                            linePath.cubicTo(cx1, cy1, cx2, cy2, pCurr.x, pCurr.y)
-                            fillPath.cubicTo(cx1, cy1, cx2, cy2, pCurr.x, pCurr.y)
-                        }
-
-                        fillPath.lineTo(points.last().x, h)
-                        fillPath.close()
-
-                        // Draw area gradient fill
-                        drawPath(
-                            path = fillPath,
-                            brush = Brush.verticalGradient(
-                                colors = listOf(WildWatermelon.copy(alpha = 0.28f), WildWatermelon.copy(alpha = 0.02f)),
-                                startY = 0f,
-                                endY = h
-                            )
-                        )
-
-                        // Draw smooth line
-                        drawPath(
-                            path = linePath,
-                            color = WildWatermelon,
-                            style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
-                        )
-
-                        // Draw data point circles
-                        points.forEachIndexed { i, pt ->
+                    // Draw Bars for Calories
+                    weeklyData.forEachIndexed { i, dayData ->
+                        if (dayData.calories > 0) {
+                            val isTodayDate = dayData.date == today
                             val isSelected = i == selectedPointIndex
-                            drawCircle(
-                                color = if (isSelected) Color.White else WildWatermelon,
-                                radius = if (isSelected) 6.dp.toPx() else 4.dp.toPx(),
-                                center = pt
-                            )
-                            if (isSelected) {
-                                drawCircle(
-                                    color = WildWatermelon,
-                                    radius = 3.dp.toPx(),
-                                    center = pt
-                                )
+                            val barTopY = getY(dayData.calories)
+                            val barHeight = h - barTopY
+                            val centerX = (i * slotWidth) + (slotWidth / 2f)
+                            val barLeft = centerX - (barWidth / 2f)
+
+                            val barColor = when {
+                                isSelected -> Color.White
+                                isTodayDate -> WildWatermelon.copy(alpha = 0.55f)
+                                dayData.calories > targetCalories -> Color(0xFFF87171)
+                                else -> WildWatermelon
                             }
+
+                            drawRoundRect(
+                                color = barColor,
+                                topLeft = Offset(barLeft, barTopY),
+                                size = Size(barWidth, barHeight),
+                                cornerRadius = CornerRadius(6.dp.toPx(), 6.dp.toPx())
+                            )
                         }
                     }
                 } else {
-                    // Macro Mode: 3 lines for Protein, Fat, Carbs
-                    val maxVal = maxOf(
-                        weeklyData.maxOfOrNull { maxOf(it.protein, it.fat, it.carbs) } ?: 100.0,
-                        maxOf(targetProtein, targetFat, targetCarbs).toDouble()
-                    ) * 1.15
+                    // Draw Macro Stacked Bars
+                    val maxMacroVal = maxOf(
+                        weeklyData.maxOfOrNull { it.protein + it.fat + it.carbs } ?: 100.0,
+                        (targetProtein + targetFat + targetCarbs).toDouble()
+                    ) * 1.18
 
-                    fun getY(g: Double): Float {
-                        val ratio = (g / maxVal).toFloat().coerceIn(0f, 1f)
-                        return h * (1f - ratio)
-                    }
+                    weeklyData.forEachIndexed { i, dayData ->
+                        if (dayData.protein > 0 || dayData.fat > 0 || dayData.carbs > 0) {
+                            val centerX = (i * slotWidth) + (slotWidth / 2f)
+                            val barLeft = centerX - (barWidth / 2f)
 
-                    fun drawMacroLine(color: Color, selector: (DayTrendData) -> Double) {
-                        val pts = weeklyData.mapIndexed { i, d -> Offset(i * stepX, getY(selector(d))) }
-                        if (pts.isEmpty()) return
-                        val path = Path().apply {
-                            moveTo(pts[0].x, pts[0].y)
-                            for (i in 1 until pts.size) {
-                                val pPrev = pts[i - 1]
-                                val pCurr = pts[i]
-                                val cx = pPrev.x + (pCurr.x - pPrev.x) / 2f
-                                cubicTo(cx, pPrev.y, cx, pCurr.y, pCurr.x, pCurr.y)
+                            var currentY = h
+
+                            listOf(
+                                dayData.protein to ProteinColor,
+                                dayData.fat to FatColor,
+                                dayData.carbs to CarbsColor
+                            ).forEach { (grams, color) ->
+                                if (grams > 0) {
+                                    val segHeight = (h * (grams / maxMacroVal)).toFloat()
+                                    val segTopY = currentY - segHeight
+                                    drawRoundRect(
+                                        color = color,
+                                        topLeft = Offset(barLeft, segTopY),
+                                        size = Size(barWidth, segHeight),
+                                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
+                                    )
+                                    currentY = segTopY
+                                }
                             }
                         }
-                        drawPath(path = path, color = color, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round))
-                        pts.forEach { drawCircle(color = color, radius = 3.dp.toPx(), center = it) }
                     }
-
-                    drawMacroLine(ProteinColor) { it.protein }
-                    drawMacroLine(FatColor) { it.fat }
-                    drawMacroLine(CarbsColor) { it.carbs }
                 }
             }
         }
@@ -343,17 +356,23 @@ fun WeeklyTrendsCard(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            val dayNames = listOf("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
             weeklyData.forEachIndexed { i, d ->
-                val dayOfWeekRu = when (d.date.dayOfWeek.value) {
-                    1 -> "Пн"; 2 -> "Вт"; 3 -> "Ср"; 4 -> "Чт"; 5 -> "Пт"; 6 -> "Сб"; else -> "Вс"
+                val dayOfWeekLabel = if (appLanguage == "en") {
+                    when (d.date.dayOfWeek.value) {
+                        1 -> "Mon"; 2 -> "Tue"; 3 -> "Wed"; 4 -> "Thu"; 5 -> "Fri"; 6 -> "Sat"; else -> "Sun"
+                    }
+                } else {
+                    when (d.date.dayOfWeek.value) {
+                        1 -> "Пн"; 2 -> "Вт"; 3 -> "Ср"; 4 -> "Чт"; 5 -> "Пт"; 6 -> "Сб"; else -> "Вс"
+                    }
                 }
+                val isTodayDate = d.date == today
                 val isSelected = i == selectedPointIndex
                 Text(
-                    text = dayOfWeekRu,
+                    text = dayOfWeekLabel + if (isTodayDate) "*" else "",
                     fontSize = 11.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isSelected) WildWatermelon else TextTertiary
+                    fontWeight = if (isSelected || isTodayDate) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isSelected) WildWatermelon else if (isTodayDate) TextPrimary else TextTertiary
                 )
             }
         }

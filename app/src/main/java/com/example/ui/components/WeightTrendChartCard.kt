@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,9 +23,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -35,6 +36,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,24 +54,32 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.model.FitnessGoal
 import com.example.data.model.WeightEntry
+import com.example.ui.theme.DangerColor
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkCardElevated
 import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.ElectricLime
+import com.example.ui.theme.OutlineStrong
+import com.example.ui.theme.ProteinColor
+import com.example.ui.theme.SuccessColor
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
+import com.example.ui.theme.WarningColor
 import com.example.ui.theme.WildWatermelon
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -77,27 +87,52 @@ import kotlin.math.roundToInt
 fun WeightTrendChartCard(
     weightEntries: List<WeightEntry>,
     targetWeightKg: Double = 68.0,
+    goal: FitnessGoal = FitnessGoal.WEIGHT_LOSS,
     onLogWeight: (weightKg: Double, dateString: String) -> Unit,
+    onDeleteWeightEntry: (dateString: String) -> Unit = {},
+    appLanguage: String = "ru",
     modifier: Modifier = Modifier
 ) {
-    var isLogDialogOpen by remember { mutableStateOf(false) }
+    val ruLocale = remember { Locale("ru") }
+    val dateLocale = remember(appLanguage) { if (appLanguage == "en") Locale.ENGLISH else ruLocale }
+    val unitKg = if (appLanguage == "en") "kg" else "кг"
+    var isLogDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var entryToDeleteDate by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Sort entries chronologically
-    val sortedEntries = remember(weightEntries) {
-        weightEntries.sortedBy { it.dateString }
+    val today = LocalDate.now()
+    val startDate30 = today.minusDays(29)
+
+    // Filter strict 30-day window relative to today
+    val periodEntries = remember(weightEntries) {
+        weightEntries.mapNotNull { entry ->
+            try {
+                val date = LocalDate.parse(entry.dateString)
+                if (!date.isBefore(startDate30) && !date.isAfter(today)) {
+                    entry to date
+                } else null
+            } catch (e: Exception) { null }
+        }.sortedBy { it.second.toString() }
     }
 
-    val firstWeight = sortedEntries.firstOrNull()?.weightKg ?: 74.5
-    val currentWeight = sortedEntries.lastOrNull()?.weightKg ?: 72.0
+    val entryToDelete = remember(entryToDeleteDate, periodEntries) {
+        if (entryToDeleteDate != null) periodEntries.find { it.first.dateString == entryToDeleteDate }?.first else null
+    }
+
+    val firstWeight = periodEntries.firstOrNull()?.first?.weightKg ?: targetWeightKg
+    val currentWeight = periodEntries.lastOrNull()?.first?.weightKg ?: targetWeightKg
     val weightDiff = currentWeight - firstWeight
-    val isLoss = weightDiff <= 0
 
-    // Touch interactive point state
-    var selectedIndex by remember(sortedEntries) {
-        mutableStateOf(if (sortedEntries.isNotEmpty()) sortedEntries.lastIndex else -1)
+    val changeColor = when (goal) {
+        FitnessGoal.WEIGHT_LOSS -> if (weightDiff <= 0) SuccessColor else DangerColor
+        FitnessGoal.WEIGHT_GAIN -> if (weightDiff >= 0) SuccessColor else DangerColor
+        FitnessGoal.MAINTENANCE -> if (kotlin.math.abs(weightDiff) <= 1.0) SuccessColor else WarningColor
     }
 
-    val selectedEntry = if (selectedIndex in sortedEntries.indices) sortedEntries[selectedIndex] else sortedEntries.lastOrNull()
+    var selectedIndex by remember(periodEntries) {
+        mutableStateOf(if (periodEntries.isNotEmpty()) periodEntries.lastIndex else -1)
+    }
+
+    val selectedPair = if (selectedIndex in periodEntries.indices) periodEntries[selectedIndex] else periodEntries.lastOrNull()
 
     Column(
         modifier = modifier
@@ -108,7 +143,7 @@ fun WeightTrendChartCard(
             .padding(18.dp)
             .testTag("weight_trend_chart_card")
     ) {
-        // Header Row: Title & + Log Weight Button
+        // Header Row
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -137,14 +172,14 @@ fun WeightTrendChartCard(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "Динамика веса (30 дней)",
+                        text = if (appLanguage == "en") "Weight Trend (30 Days)" else "Динамика веса (30 дней)",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary,
                         maxLines = 1
                     )
                     Text(
-                        text = "График изменения тела и прогресс",
+                        text = if (appLanguage == "en") "Weight records & 7-day average" else "График взвешиваний и 7-дневное среднее",
                         fontSize = 11.sp,
                         color = TextSecondary,
                         maxLines = 1
@@ -157,7 +192,7 @@ fun WeightTrendChartCard(
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = WildWatermelon,
-                    contentColor = Color.White
+                    contentColor = Color(0xFF101014)
                 ),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                 modifier = Modifier.testTag("log_weight_button")
@@ -166,19 +201,9 @@ fun WeightTrendChartCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
+                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Записать",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                    Text(if (appLanguage == "en") "Log Weight" else "Записать", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -186,82 +211,66 @@ fun WeightTrendChartCard(
         Spacer(modifier = Modifier.height(14.dp))
 
         // Summary Metrics Bar
+        val unitKg = if (appLanguage == "en") "kg" else "кг"
+        val dateLocale = if (appLanguage == "en") Locale.ENGLISH else ruLocale
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
                 .background(DarkCardElevated)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 10.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
-                Text(text = "30д назад", fontSize = 10.sp, color = TextSecondary)
-                Text(text = "%.1f кг".format(Locale.US, firstWeight), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(text = if (appLanguage == "en") "30d ago" else "30д назад", fontSize = 10.sp, color = TextSecondary)
+                Text(text = String.format(dateLocale, "%.1f %s", firstWeight, unitKg), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
             }
 
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(28.dp)
-                    .background(DarkBorder)
-            )
+            Box(modifier = Modifier.width(1.dp).height(26.dp).background(DarkBorder))
 
             Column {
-                Text(text = "Текущий", fontSize = 10.sp, color = TextSecondary)
-                Text(text = "%.1f кг".format(Locale.US, currentWeight), fontSize = 14.sp, fontWeight = FontWeight.Bold, color = WildWatermelon)
+                Text(text = if (appLanguage == "en") "Current" else "Текущий", fontSize = 10.sp, color = TextSecondary)
+                Text(text = String.format(dateLocale, "%.1f %s", currentWeight, unitKg), fontSize = 14.sp, fontWeight = FontWeight.Bold, color = WildWatermelon)
             }
 
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(28.dp)
-                    .background(DarkBorder)
-            )
+            Box(modifier = Modifier.width(1.dp).height(26.dp).background(DarkBorder))
 
             Column {
-                Text(text = "Изменение", fontSize = 10.sp, color = TextSecondary)
+                Text(text = if (appLanguage == "en") "In 30 days" else "За 30 дней", fontSize = 10.sp, color = TextSecondary)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = if (isLoss) Icons.Default.TrendingDown else Icons.Default.TrendingUp,
+                        imageVector = if (weightDiff <= 0) Icons.Default.TrendingDown else Icons.Default.TrendingUp,
                         contentDescription = null,
-                        tint = if (isLoss) ElectricLime else Color(0xFFFB7185),
+                        tint = changeColor,
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(2.dp))
                     Text(
-                        text = "%+.1f кг".format(Locale.US, weightDiff),
+                        text = String.format(dateLocale, "%+.1f %s", weightDiff, unitKg),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isLoss) ElectricLime else Color(0xFFFB7185)
+                        color = changeColor
                     )
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(28.dp)
-                    .background(DarkBorder)
-            )
+            Box(modifier = Modifier.width(1.dp).height(26.dp).background(DarkBorder))
 
             Column {
-                Text(text = "Цель", fontSize = 10.sp, color = TextSecondary)
-                Text(text = "%.1f кг".format(Locale.US, targetWeightKg), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ElectricLime)
+                Text(text = if (appLanguage == "en") "Goal" else "Цель", fontSize = 10.sp, color = TextSecondary)
+                Text(text = String.format(dateLocale, "%.1f %s", targetWeightKg, unitKg), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = SuccessColor)
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Active Recharts Tooltip Box
-        if (selectedEntry != null) {
-            val dateFormatted = try {
-                val d = LocalDate.parse(selectedEntry.dateString)
-                d.format(DateTimeFormatter.ofPattern("d MMMM yyyy", Locale("ru")))
-            } catch (e: Exception) {
-                selectedEntry.dateString
-            }
-            val pointDiff = selectedEntry.weightKg - firstWeight
+        // Selected Point Tooltip Box
+        if (selectedPair != null) {
+            val (entry, entryDate) = selectedPair
+            val dateFormatted = DateTimeFormatter.ofPattern("d MMMM yyyy", dateLocale).format(entryDate)
+            val pointDiff = entry.weightKg - firstWeight
 
             Box(
                 modifier = Modifier
@@ -277,37 +286,41 @@ fun WeightTrendChartCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(WildWatermelon)
-                        )
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(WildWatermelon))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(text = dateFormatted, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = TextSecondary)
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "%.1f кг".format(Locale.US, selectedEntry.weightKg),
+                            text = String.format(dateLocale, "%.1f %s", entry.weightKg, unitKg),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "(%+.1f кг)".format(Locale.US, pointDiff),
+                            text = String.format(dateLocale, "(%+.1f %s)", pointDiff, unitKg),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (pointDiff <= 0) ElectricLime else Color(0xFFFB7185)
+                            color = changeColor
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        IconButton(
+                            onClick = { entryToDeleteDate = entry.dateString },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Delete, contentDescription = "Удалить взвешивание", tint = DangerColor, modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
         }
 
-        // Recharts Interactive Bezier Line Chart Canvas
+        val weightDesc = String.format(ruLocale, "График динамики веса за последние 30 дней. Начальный %.1f кг, текущий %.1f кг, изменение %+.1f кг, целевой %.1f кг.", firstWeight, currentWeight, weightDiff, targetWeightKg)
+
+        // Proportional Chart Canvas
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -317,25 +330,46 @@ fun WeightTrendChartCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(160.dp)
-                    .pointerInput(sortedEntries) {
-                        detectTapGestures { offset ->
-                            if (sortedEntries.isNotEmpty()) {
-                                val width = size.width
-                                val step = width / (sortedEntries.size - 1).coerceAtLeast(1)
-                                val index = (offset.x / step).roundToInt().coerceIn(0, sortedEntries.lastIndex)
-                                selectedIndex = index
+                    .semantics { contentDescription = weightDesc }
+                    .pointerInput(periodEntries) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                if (periodEntries.isNotEmpty()) {
+                                    val w = size.width
+                                    val closestIndex = periodEntries.indices.minByOrNull { idx ->
+                                        val entryDate = periodEntries[idx].second
+                                        val daysFromStart = ChronoUnit.DAYS.between(startDate30, entryDate).toFloat().coerceIn(0f, 29f)
+                                        val x = (daysFromStart / 29f) * w
+                                        kotlin.math.abs(x - offset.x)
+                                    } ?: -1
+                                    selectedIndex = closestIndex
+                                }
+                            },
+                            onLongPress = { offset ->
+                                if (periodEntries.isNotEmpty()) {
+                                    val w = size.width
+                                    val closestIndex = periodEntries.indices.minByOrNull { idx ->
+                                        val entryDate = periodEntries[idx].second
+                                        val daysFromStart = ChronoUnit.DAYS.between(startDate30, entryDate).toFloat().coerceIn(0f, 29f)
+                                        val x = (daysFromStart / 29f) * w
+                                        kotlin.math.abs(x - offset.x)
+                                    } ?: -1
+                                    if (closestIndex in periodEntries.indices) {
+                                        entryToDelete = periodEntries[closestIndex].first
+                                    }
+                                }
                             }
-                        }
+                        )
                     }
             ) {
-                if (sortedEntries.isEmpty()) return@Canvas
+                if (periodEntries.isEmpty()) return@Canvas
 
                 val w = size.width
                 val h = size.height
 
-                // Y scale calculation with margins
-                val minVal = (sortedEntries.minOf { it.weightKg }.coerceAtMost(targetWeightKg) - 1.0)
-                val maxVal = (sortedEntries.maxOf { it.weightKg }.coerceAtLeast(targetWeightKg) + 1.0)
+                val allValues = periodEntries.map { it.first.weightKg } + targetWeightKg
+                val minVal = (allValues.minOrNull() ?: 60.0) - 1.0
+                val maxVal = (allValues.maxOrNull() ?: 80.0) + 1.0
                 val range = (maxVal - minVal).coerceAtLeast(1.0)
 
                 fun getY(valKg: Double): Float {
@@ -343,30 +377,58 @@ fun WeightTrendChartCard(
                     return (h - (ratio * h * 0.82f) - (h * 0.08f)).toFloat()
                 }
 
-                fun getX(index: Int): Float {
-                    return if (sortedEntries.size <= 1) w / 2f
-                    else index * (w / (sortedEntries.size - 1))
+                fun getX(date: LocalDate): Float {
+                    val daysFromStart = ChronoUnit.DAYS.between(startDate30, date).toFloat().coerceIn(0f, 29f)
+                    return (daysFromStart / 29f) * w
                 }
 
-                // Dotted Horizontal Line for Target Weight
+                // Dotted Target Line
                 val targetY = getY(targetWeightKg)
                 drawLine(
-                    color = ElectricLime.copy(alpha = 0.5f),
+                    color = SuccessColor.copy(alpha = 0.5f),
                     start = Offset(0f, targetY),
                     end = Offset(w, targetY),
                     strokeWidth = 1.5.dp.toPx(),
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
                 )
 
-                // Build Smoothed Bezier Path
-                val strokePath = Path()
-                val fillPath = Path()
-
-                val points = sortedEntries.mapIndexed { idx, entry ->
-                    Offset(getX(idx), getY(entry.weightKg))
+                // 7-day moving average calculation
+                val points = periodEntries.map { (entry, date) ->
+                    val x = getX(date)
+                    val y = getY(entry.weightKg)
+                    Offset(x, y)
                 }
 
+                val movingAvgPoints = periodEntries.map { (_, date) ->
+                    val windowStart = date.minusDays(6)
+                    val window = periodEntries.filter { (_, d) -> !d.isBefore(windowStart) && !d.isAfter(date) }
+                    val avgWeight = if (window.isNotEmpty()) window.sumOf { it.first.weightKg } / window.size else 70.0
+                    Offset(getX(date), getY(avgWeight))
+                }
+
+                // Draw 7-day Moving Average Line (dashed ProteinColor)
+                if (movingAvgPoints.size >= 2) {
+                    val avgPath = Path().apply {
+                        moveTo(movingAvgPoints.first().x, movingAvgPoints.first().y)
+                        for (i in 1 until movingAvgPoints.size) {
+                            val p1 = movingAvgPoints[i - 1]
+                            val p2 = movingAvgPoints[i]
+                            val cx = p1.x + (p2.x - p1.x) / 2f
+                            cubicTo(cx, p1.y, cx, p2.y, p2.x, p2.y)
+                        }
+                    }
+                    drawPath(
+                        path = avgPath,
+                        color = ProteinColor.copy(alpha = 0.8f),
+                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f))
+                    )
+                }
+
+                // Draw Main Weight Curve
                 if (points.isNotEmpty()) {
+                    val strokePath = Path()
+                    val fillPath = Path()
+
                     strokePath.moveTo(points.first().x, points.first().y)
                     fillPath.moveTo(points.first().x, h)
                     fillPath.lineTo(points.first().x, points.first().y)
@@ -383,54 +445,30 @@ fun WeightTrendChartCard(
                     fillPath.lineTo(points.last().x, h)
                     fillPath.close()
 
-                    // Fill Gradient
                     drawPath(
                         path = fillPath,
                         brush = Brush.verticalGradient(
-                            colors = listOf(
-                                WildWatermelon.copy(alpha = 0.30f),
-                                WildWatermelon.copy(alpha = 0.02f)
-                            )
+                            colors = listOf(WildWatermelon.copy(alpha = 0.28f), WildWatermelon.copy(alpha = 0.02f))
                         )
                     )
 
-                    // Smooth Chart Line
                     drawPath(
                         path = strokePath,
                         color = WildWatermelon,
                         style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
                     )
 
-                    // Active Node Selection
-                    if (selectedIndex in points.indices) {
-                        val activePoint = points[selectedIndex]
-
-                        // Vertical reference line
-                        drawLine(
-                            color = TextSecondary.copy(alpha = 0.4f),
-                            start = Offset(activePoint.x, 0f),
-                            end = Offset(activePoint.x, h),
-                            strokeWidth = 1.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
-                        )
-
-                        // Outer halo
+                    // Draw Data Points
+                    points.forEachIndexed { i, pt ->
+                        val isSelected = i == selectedIndex
                         drawCircle(
-                            color = WildWatermelon.copy(alpha = 0.25f),
-                            radius = 12.dp.toPx(),
-                            center = activePoint
+                            color = if (isSelected) Color.White else WildWatermelon,
+                            radius = if (isSelected) 6.dp.toPx() else 4.dp.toPx(),
+                            center = pt
                         )
-                        // Inner circle
-                        drawCircle(
-                            color = Color.White,
-                            radius = 5.dp.toPx(),
-                            center = activePoint
-                        )
-                        drawCircle(
-                            color = WildWatermelon,
-                            radius = 3.dp.toPx(),
-                            center = activePoint
-                        )
+                        if (isSelected) {
+                            drawCircle(color = WildWatermelon, radius = 3.dp.toPx(), center = pt)
+                        }
                     }
                 }
             }
@@ -438,44 +476,70 @@ fun WeightTrendChartCard(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // X-Axis Date Labels Row
-        if (sortedEntries.size >= 5) {
-            val labelIndices = listOf(
-                0,
-                sortedEntries.size / 4,
-                sortedEntries.size / 2,
-                (sortedEntries.size * 3) / 4,
-                sortedEntries.lastIndex
-            )
+        // X-Axis Date Range Labels
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            val dateStartLabel = DateTimeFormatter.ofPattern("d MMM", ruLocale).format(startDate30)
+            val dateMidLabel = DateTimeFormatter.ofPattern("d MMM", ruLocale).format(startDate30.plusDays(15))
+            val dateEndLabel = DateTimeFormatter.ofPattern("d MMM", ruLocale).format(today)
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                labelIndices.forEach { idx ->
-                    val entry = sortedEntries[idx]
-                    val label = try {
-                        val d = LocalDate.parse(entry.dateString)
-                        d.format(DateTimeFormatter.ofPattern("dd MMM", Locale("ru")))
-                    } catch (e: Exception) {
-                        entry.dateString.takeLast(5)
-                    }
-                    Text(
-                        text = label,
-                        fontSize = 10.sp,
-                        color = if (idx == selectedIndex) WildWatermelon else TextTertiary,
-                        fontWeight = if (idx == selectedIndex) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
-            }
+            Text(text = dateStartLabel, fontSize = 10.sp, color = TextTertiary)
+            Text(text = dateMidLabel, fontSize = 10.sp, color = TextTertiary)
+            Text(text = dateEndLabel, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = WildWatermelon)
         }
     }
 
-    // Modal Dialog to Log Weight
+    // Modal Confirmation Dialog to Delete Weight Entry
+    if (entryToDelete != null) {
+        val entry = entryToDelete!!
+        AlertDialog(
+            onDismissRequest = { entryToDelete = null },
+            containerColor = DarkSurface,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text(if (appLanguage == "en") "Delete Weight Entry" else "Удалить запись веса?", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = TextPrimary) },
+            text = {
+                val formattedW = String.format(dateLocale, "%.1f %s", entry.weightKg, unitKg)
+                val textMsg = if (appLanguage == "en")
+                    "Are you sure you want to delete weight record $formattedW for ${entry.dateString}?"
+                else
+                    "Вы уверены, что хотите удалить запись веса $formattedW за ${entry.dateString}?"
+                Text(text = textMsg, fontSize = 13.sp, color = TextSecondary)
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteWeightEntry(entry.dateString)
+                        entryToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = DangerColor, contentColor = Color.White),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(if (appLanguage == "en") "Delete" else "Удалить", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { entryToDelete = null }) {
+                    Text(if (appLanguage == "en") "Cancel" else "Отмена", color = TextTertiary)
+                }
+            }
+        )
+    }
+
+    // Modal Dialog to Log Weight for Any Past Date
     if (isLogDialogOpen) {
-        var inputWeight by remember {
-            mutableStateOf("%.1f".format(Locale.US, currentWeight))
-        }
+        var inputWeight by remember { mutableStateOf(String.format(ruLocale, "%.1f", currentWeight)) }
+        var inputDateText by remember { mutableStateOf(LocalDate.now().toString()) }
+
+        val parsedDate = try {
+            val d = LocalDate.parse(inputDateText.trim())
+            if (!d.isAfter(LocalDate.now())) d else null
+        } catch (e: Exception) { null }
+
+        val parsedWeight = inputWeight.replace(',', '.').toDoubleOrNull()
+        val isWeightValid = parsedWeight != null && parsedWeight in 25.0..300.0
+        val isDateError = inputDateText.isNotBlank() && parsedDate == null
 
         Dialog(
             onDismissRequest = { isLogDialogOpen = false },
@@ -498,12 +562,7 @@ fun WeightTrendChartCard(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "Запись веса",
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
+                        Text(if (appLanguage == "en") "Log Weight" else "Запись веса", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                         IconButton(onClick = { isLogDialogOpen = false }) {
                             Icon(imageVector = Icons.Default.Close, contentDescription = "Закрыть", tint = TextSecondary)
                         }
@@ -511,26 +570,48 @@ fun WeightTrendChartCard(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(
-                        text = "Внесите текущие показания взвешивания (сегодня):",
-                        fontSize = 12.sp,
-                        color = TextSecondary,
-                        modifier = Modifier.fillMaxWidth()
+                    // Date Input Field (YYYY-MM-DD)
+                    OutlinedTextField(
+                        value = inputDateText,
+                        onValueChange = { inputDateText = it },
+                        label = { Text(if (appLanguage == "en") "Date (YYYY-MM-DD)" else "Дата (ГГГГ-ММ-ДД)") },
+                        singleLine = true,
+                        isError = isDateError,
+                        supportingText = {
+                            if (isDateError) {
+                                Text(
+                                    text = if (appLanguage == "en") "Format YYYY-MM-DD (not in future)" else "Формат ГГГГ-ММ-ДД (не в будущем)",
+                                    color = DangerColor,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = WildWatermelon,
+                            unfocusedBorderColor = OutlineStrong,
+                            errorBorderColor = DangerColor,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedContainerColor = DarkCard,
+                            unfocusedContainerColor = DarkCard
+                        )
                     )
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
+                    // Weight Input Field
                     OutlinedTextField(
                         value = inputWeight,
                         onValueChange = { inputWeight = it },
-                        label = { Text("Вес (кг)") },
+                        label = { Text(if (appLanguage == "en") "Weight (kg)" else "Вес (кг)") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = WildWatermelon,
-                            unfocusedBorderColor = DarkBorder,
+                            unfocusedBorderColor = OutlineStrong,
                             focusedTextColor = TextPrimary,
                             unfocusedTextColor = TextPrimary,
                             focusedContainerColor = DarkCard,
@@ -552,14 +633,14 @@ fun WeightTrendChartCard(
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(DarkCardElevated)
                                     .clickable {
-                                        val cur = inputWeight.toDoubleOrNull() ?: currentWeight
-                                        inputWeight = "%.1f".format(Locale.US, (cur + step).coerceIn(30.0, 300.0))
+                                        val cur = inputWeight.replace(',', '.').toDoubleOrNull() ?: currentWeight
+                                        inputWeight = String.format(ruLocale, "%.1f", (cur + step).coerceIn(25.0, 300.0))
                                     }
                                     .padding(vertical = 8.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "%+.1f".format(Locale.US, step),
+                                    text = String.format(ruLocale, "%+.1f", step),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = WildWatermelon
@@ -570,26 +651,29 @@ fun WeightTrendChartCard(
 
                     Spacer(modifier = Modifier.height(20.dp))
 
+                    val view = androidx.compose.ui.platform.LocalView.current
+
                     Button(
                         onClick = {
-                            val doubleVal = inputWeight.replace(',', '.').toDoubleOrNull()
-                            if (doubleVal != null && doubleVal in 30.0..300.0) {
-                                onLogWeight(doubleVal, LocalDate.now().toString())
+                            if (parsedDate != null && isWeightValid && parsedWeight != null) {
+                                com.example.ui.util.HapticUtil.performConfirm(view)
+                                onLogWeight(parsedWeight, parsedDate.toString())
                                 isLogDialogOpen = false
                             }
                         },
+                        enabled = parsedDate != null && isWeightValid,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = WildWatermelon,
-                            contentColor = Color.White
+                            contentColor = Color(0xFF101014),
+                            disabledContainerColor = DarkBorder,
+                            disabledContentColor = TextTertiary
                         ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
+                        modifier = Modifier.fillMaxWidth().height(50.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Check, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Сохранить вес", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text(if (appLanguage == "en") "Save Weight" else "Сохранить вес", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                 }
             }

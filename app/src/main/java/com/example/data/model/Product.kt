@@ -14,7 +14,8 @@ data class Product(
     val fat: Double,      // g per 100g
     val carbs: Double,    // g per 100g
     val barcode: String? = null,
-    val isCustom: Boolean = false
+    val isCustom: Boolean = false,
+    val isFavorite: Boolean = false
 ) {
     fun calculateForWeight(grams: Double): MacroCalculations {
         val multiplier = grams / 100.0
